@@ -92,37 +92,50 @@ func (v *VideoStreamer) StartStreaming() {
 func (v *VideoStreamer) streamLoop() {
 	log.Println("Starting video stream at 30 FPS")
 
-	// 30 FPS = 33.33ms per frame
-	ticker := time.NewTicker(time.Millisecond * 33)
+	// Pre-load ALL files into memory to eliminate I/O blocking
+	log.Println("Pre-loading all H.264 files into memory...")
+	frameDataCache := make([][]byte, len(v.frameFiles))
+	for i, filePath := range v.frameFiles {
+		data, err := v.readH264File(filePath)
+		if err != nil {
+			log.Printf("Failed to pre-load frame %d (%s): %v", i, filepath.Base(filePath), err)
+			frameDataCache[i] = nil
+			continue
+		}
+		frameDataCache[i] = data
+	}
+	log.Printf("Pre-loaded %d frames into memory", len(frameDataCache))
+
+	// 30 FPS = 33.33ms per frame - use precise timing
+	ticker := time.NewTicker(time.Duration(1000000000/30) * time.Nanosecond) // Exactly 30 FPS
 	defer ticker.Stop()
 
 	frameIndex := 0
 	frameCounter := 0
+	skippedFrames := 0
 
 	for {
 		select {
 		case <-v.stopChan:
-			log.Println("Stopping video stream")
+			log.Printf("Stopping video stream. Sent %d frames, skipped %d frames", frameCounter, skippedFrames)
 			v.isStreaming = false
 			return
 		case <-ticker.C:
-			// Read the current frame file
-			frameData, err := v.readH264File(v.frameFiles[frameIndex])
-			if err != nil {
-				log.Printf("Failed to read frame %d: %v", frameIndex, err)
-				// Move to next frame even on error to maintain timing
+			// Use pre-loaded frame data
+			frameData := frameDataCache[frameIndex]
+			if frameData == nil {
+				log.Printf("Skipping corrupted frame %d", frameIndex)
 				frameIndex = (frameIndex + 1) % len(v.frameFiles)
-				frameCounter++
+				skippedFrames++
 				continue
 			}
 
 			// Parse H.264 NAL units
 			nalUnits := v.h264Parser.FindNALUnits(frameData)
 			if len(nalUnits) == 0 {
-				log.Printf("No NAL units found in frame %d", frameIndex)
-				// Move to next frame even if no NAL units to maintain timing
+				log.Printf("No NAL units in frame %d, skipping", frameIndex)
 				frameIndex = (frameIndex + 1) % len(v.frameFiles)
-				frameCounter++
+				skippedFrames++
 				continue
 			}
 
@@ -132,10 +145,10 @@ func (v *VideoStreamer) streamLoop() {
 			// Convert back to Annex B format
 			processedData := v.h264Parser.ConvertToAnnexB(processedUnits)
 
-			// Send the processed frame via WebRTC
-			err = v.videoTrack.WriteSample(media.Sample{
+			// Send the processed frame via WebRTC - non-blocking
+			err := v.videoTrack.WriteSample(media.Sample{
 				Data:     processedData,
-				Duration: time.Millisecond * 33,
+				Duration: time.Duration(1000000000/30) * time.Nanosecond, // Exactly 33.333ms
 			})
 
 			if err != nil {
@@ -145,6 +158,7 @@ func (v *VideoStreamer) streamLoop() {
 					return
 				}
 				log.Printf("Failed to write frame %d: %v", frameIndex, err)
+				// Continue even on write error to maintain timing
 			}
 
 			frameCounter++
@@ -152,9 +166,10 @@ func (v *VideoStreamer) streamLoop() {
 			// Log progress every second (30 frames)
 			if frameCounter%30 == 0 {
 				elapsed := float64(frameCounter) / 30.0
-				progress := float64(frameIndex) / float64(len(v.frameFiles)) * 100
-				log.Printf("Streamed %d frames (%.1f seconds, %.1f%% through sequence, current: %s)",
-					frameCounter, elapsed, progress, filepath.Base(v.frameFiles[frameIndex]))
+				totalFrames := len(v.frameFiles)
+				cycleProgress := float64(frameIndex) / float64(totalFrames) * 100
+				log.Printf("Streamed %d frames (%.1f sec elapsed, %.1f%% in current cycle, frame: %s)",
+					frameCounter, elapsed, cycleProgress, filepath.Base(v.frameFiles[frameIndex]))
 			}
 
 			// Move to next frame, loop back to start if at end
