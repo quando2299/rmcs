@@ -9,7 +9,7 @@ import (
 type WebRTCManager struct {
 	peerConnection *webrtc.PeerConnection
 	videoTrack     *webrtc.TrackLocalStaticSample
-	videoStreamer  *VideoStreamerProper
+	videoStreamer  *VideoStreamer
 }
 
 // ICECandidateMessage represents an ICE candidate from Flutter
@@ -61,7 +61,7 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	})
 
 	// Create proper video streamer based on libdatachannel C++ reference
-	videoStreamer := NewVideoStreamerProper(videoTrack)
+	videoStreamer := NewVideoStreamer(videoTrack)
 
 	// Load H.264 files
 	if err := videoStreamer.LoadH264Files("leopard_id4_image_resized_30fps"); err != nil {

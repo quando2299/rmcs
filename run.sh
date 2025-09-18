@@ -40,6 +40,7 @@ else
 fi
 
 # Run the Docker container with appropriate settings
+# The container will automatically build and run the streaming application
 docker run -it \
     --name ${CONTAINER_NAME} \
     ${RUNTIME_FLAG} \
@@ -52,6 +53,6 @@ docker run -it \
     --add-host=host.docker.internal:host-gateway \
     ${DEVICE_FLAGS} \
     ${IMAGE_NAME}:${IMAGE_TAG} \
-    /bin/bash
+    /bin/bash -c "echo 'Building Go application...' && go build -o rmcs . && echo 'Starting streaming server...' && ./rmcs"
 
 echo "Container stopped."

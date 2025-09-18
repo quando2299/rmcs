@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -9,25 +10,47 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+// NAL unit types based on C++ reference
+const (
+	NAL_SPS = 7  // Sequence Parameter Set
+	NAL_PPS = 8  // Picture Parameter Set
+	NAL_IDR = 5  // IDR frame
+)
+
 type VideoStreamer struct {
-	videoTrack *webrtc.TrackLocalStaticSample
-	frameFiles []string
-	isStreaming bool
-	stopChan   chan bool
-	h264Parser *H264Parser
+	track         *webrtc.TrackLocalStaticSample
+	frameFiles    []string
+	isStreaming   bool
+	stopChan      chan bool
+	mu            sync.Mutex
+
+	// Cached NAL units like C++ implementation
+	sps           []byte  // Type 7
+	pps           []byte  // Type 8
+	lastIDR       []byte  // Type 5
+
+	// Timing management
+	fps           uint32
+	sampleDurationUs uint64  // microseconds per frame
+	sampleTimeUs  uint64     // current sample timestamp in microseconds
+	frameCounter  int
 }
 
-func NewVideoStreamer(videoTrack *webrtc.TrackLocalStaticSample) *VideoStreamer {
+func NewVideoStreamer(track *webrtc.TrackLocalStaticSample) *VideoStreamer {
+	fps := uint32(30)
 	return &VideoStreamer{
-		videoTrack: videoTrack,
-		stopChan:   make(chan bool),
-		h264Parser: &H264Parser{},
+		track:            track,
+		stopChan:         make(chan bool),
+		fps:              fps,
+		sampleDurationUs: 1000000 / uint64(fps), // 33333 microseconds per frame at 30 FPS
+		frameCounter:     -1,
 	}
 }
 
@@ -37,164 +60,245 @@ func (v *VideoStreamer) LoadH264Files(directory string) error {
 		return err
 	}
 
-	// Sort files numerically
+	if len(files) == 0 {
+		return fmt.Errorf("no H.264 files found in %s", directory)
+	}
+
+	// Sort files numerically like C++ implementation
 	sort.Slice(files, func(i, j int) bool {
-		// Extract numbers from filenames
-		numI := extractNumber(filepath.Base(files[i]))
-		numJ := extractNumber(filepath.Base(files[j]))
+		numI := extractFileNumber(filepath.Base(files[i]))
+		numJ := extractFileNumber(filepath.Base(files[j]))
 		return numI < numJ
 	})
 
 	v.frameFiles = files
-	duration := float64(len(files)) / 30.0
-	log.Printf("Loaded %d H.264 files from %s (%.2f seconds at 30 FPS)", len(files), directory, duration)
+	log.Printf("Loaded %d H.264 files from %s", len(files), directory)
 
-	// Log first and last few files to verify order
+	// Parse first file to get initial NAL units
 	if len(files) > 0 {
-		log.Printf("First file: %s", filepath.Base(files[0]))
-		if len(files) > 1 {
-			log.Printf("Last file: %s", filepath.Base(files[len(files)-1]))
-		}
+		v.parseInitialNALUnits(files[0])
 	}
 
 	return nil
 }
 
-func extractNumber(filename string) int {
-	// Extract number from filename like "sample-123.h264"
+func extractFileNumber(filename string) int {
+	// Extract number from "sample-123.h264"
 	parts := strings.Split(filename, "-")
 	if len(parts) < 2 {
 		return 0
 	}
 	numStr := strings.TrimSuffix(parts[1], ".h264")
-	num, err := strconv.Atoi(numStr)
-	if err != nil {
-		return 0
-	}
+	num, _ := strconv.Atoi(numStr)
 	return num
 }
 
-func (v *VideoStreamer) StartStreaming() {
-	if v.isStreaming {
-		log.Println("Already streaming")
-		return
+func (v *VideoStreamer) parseInitialNALUnits(filepath string) error {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return err
 	}
 
-	if len(v.frameFiles) == 0 {
-		log.Println("No H.264 files loaded")
+	// Parse NAL units with 4-byte length prefix
+	i := 0
+	for i < len(data) {
+		if i+4 > len(data) {
+			break
+		}
+
+		// Read 4-byte length (big-endian)
+		length := binary.BigEndian.Uint32(data[i:i+4])
+		naluStartIndex := i + 4
+		naluEndIndex := naluStartIndex + int(length)
+
+		if naluEndIndex > len(data) {
+			break
+		}
+
+		// Get NAL unit type from header
+		if naluStartIndex < len(data) {
+			nalType := data[naluStartIndex] & 0x1F
+
+			// Store ONLY the NAL unit data (without length prefix)
+			nalUnitData := data[naluStartIndex:naluEndIndex]
+
+			switch nalType {
+			case NAL_SPS:
+				v.sps = make([]byte, len(nalUnitData))
+				copy(v.sps, nalUnitData)
+				log.Printf("Cached SPS NAL unit (%d bytes)", len(v.sps))
+			case NAL_PPS:
+				v.pps = make([]byte, len(nalUnitData))
+				copy(v.pps, nalUnitData)
+				log.Printf("Cached PPS NAL unit (%d bytes)", len(v.pps))
+			case NAL_IDR:
+				v.lastIDR = make([]byte, len(nalUnitData))
+				copy(v.lastIDR, nalUnitData)
+				log.Printf("Cached IDR NAL unit (%d bytes)", len(v.lastIDR))
+			}
+		}
+
+		i = naluEndIndex
+	}
+
+	return nil
+}
+
+func (v *VideoStreamer) getInitialNALUnits() []byte {
+	// Return SPS + PPS + IDR in Annex B format for WebRTC
+	var result []byte
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
+
+	if v.sps != nil {
+		result = append(result, startCode...)
+		result = append(result, v.sps...)
+	}
+	if v.pps != nil {
+		result = append(result, startCode...)
+		result = append(result, v.pps...)
+	}
+	if v.lastIDR != nil {
+		result = append(result, startCode...)
+		result = append(result, v.lastIDR...)
+	}
+
+	return result
+}
+
+func (v *VideoStreamer) StartStreaming() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.isStreaming {
 		return
 	}
 
 	v.isStreaming = true
+	v.frameCounter = -1
+	v.sampleTimeUs = 0
+
 	go v.streamLoop()
 }
 
-func (v *VideoStreamer) streamLoop() {
-	log.Println("Starting video stream at 30 FPS")
+func (v *VideoStreamer) StopStreaming() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
 
-	// Pre-load ALL files into memory to eliminate I/O blocking
-	log.Println("Pre-loading all H.264 files into memory...")
-	frameDataCache := make([][]byte, len(v.frameFiles))
-	for i, filePath := range v.frameFiles {
-		data, err := v.readH264File(filePath)
-		if err != nil {
-			log.Printf("Failed to pre-load frame %d (%s): %v", i, filepath.Base(filePath), err)
-			frameDataCache[i] = nil
-			continue
-		}
-		frameDataCache[i] = data
+	if v.isStreaming {
+		v.stopChan <- true
+		v.isStreaming = false
 	}
-	log.Printf("Pre-loaded %d frames into memory", len(frameDataCache))
+}
 
-	// 30 FPS = 33.33ms per frame - use precise timing
-	ticker := time.NewTicker(time.Duration(1000000000/30) * time.Nanosecond) // Exactly 30 FPS
+func (v *VideoStreamer) streamLoop() {
+	log.Println("Starting proper video stream with microsecond timing")
+
+	// Send initial NAL units immediately
+	if initialData := v.getInitialNALUnits(); len(initialData) > 0 {
+		v.track.WriteSample(media.Sample{
+			Data:     initialData,
+			Duration: time.Duration(v.sampleDurationUs) * time.Microsecond,
+		})
+		log.Printf("Sent initial NAL units (%d bytes)", len(initialData))
+	}
+
+	// Create ticker with microsecond precision
+	ticker := time.NewTicker(time.Duration(v.sampleDurationUs) * time.Microsecond)
 	defer ticker.Stop()
 
-	frameIndex := 0
-	frameCounter := 0
-	skippedFrames := 0
+	startTime := time.Now()
+	framesSent := 0
 
 	for {
 		select {
 		case <-v.stopChan:
-			log.Printf("Stopping video stream. Sent %d frames, skipped %d frames", frameCounter, skippedFrames)
-			v.isStreaming = false
+			log.Printf("Stopping stream. Sent %d frames", framesSent)
 			return
+
 		case <-ticker.C:
-			// Use pre-loaded frame data
-			frameData := frameDataCache[frameIndex]
-			if frameData == nil {
-				log.Printf("Skipping corrupted frame %d", frameIndex)
-				frameIndex = (frameIndex + 1) % len(v.frameFiles)
-				skippedFrames++
+			v.frameCounter++
+			if v.frameCounter >= len(v.frameFiles) {
+				if v.frameCounter > 0 {
+					// Loop back to start
+					v.frameCounter = 0
+					log.Println("Looping video")
+				}
+			}
+
+			// Read frame file
+			filepath := v.frameFiles[v.frameCounter]
+			data, err := os.ReadFile(filepath)
+			if err != nil {
+				log.Printf("Failed to read frame %d: %v", v.frameCounter, err)
 				continue
 			}
 
-			// Parse H.264 NAL units
-			nalUnits := v.h264Parser.FindNALUnits(frameData)
-			if len(nalUnits) == 0 {
-				log.Printf("No NAL units in frame %d, skipping", frameIndex)
-				frameIndex = (frameIndex + 1) % len(v.frameFiles)
-				skippedFrames++
-				continue
-			}
+			// Convert to Annex B format for WebRTC
+			annexBData := v.convertToAnnexB(data)
 
-			// Process NAL units (handle SPS/PPS)
-			processedUnits := v.h264Parser.ProcessNALUnits(nalUnits)
+			// Update timing
+			v.sampleTimeUs += v.sampleDurationUs
 
-			// Convert back to Annex B format
-			processedData := v.h264Parser.ConvertToAnnexB(processedUnits)
-
-			// Send the processed frame via WebRTC - non-blocking
-			err := v.videoTrack.WriteSample(media.Sample{
-				Data:     processedData,
-				Duration: time.Duration(1000000000/30) * time.Nanosecond, // Exactly 33.333ms
+			// Send frame with proper duration
+			err = v.track.WriteSample(media.Sample{
+				Data:     annexBData,
+				Duration: time.Duration(v.sampleDurationUs) * time.Microsecond,
 			})
 
 			if err != nil {
 				if err == io.ErrClosedPipe {
-					log.Println("Track closed, stopping stream")
-					v.isStreaming = false
+					log.Println("Track closed")
 					return
 				}
-				log.Printf("Failed to write frame %d: %v", frameIndex, err)
-				// Continue even on write error to maintain timing
+				log.Printf("Write error: %v", err)
+				continue
 			}
 
-			frameCounter++
+			framesSent++
 
-			// Log progress every second (30 frames)
-			if frameCounter%30 == 0 {
-				elapsed := float64(frameCounter) / 30.0
-				totalFrames := len(v.frameFiles)
-				cycleProgress := float64(frameIndex) / float64(totalFrames) * 100
-				log.Printf("Streamed %d frames (%.1f sec elapsed, %.1f%% in current cycle, frame: %s)",
-					frameCounter, elapsed, cycleProgress, filepath.Base(v.frameFiles[frameIndex]))
+			// Log progress
+			if framesSent%30 == 0 {
+				elapsed := time.Since(startTime).Seconds()
+				expectedTime := float64(framesSent) / float64(v.fps)
+				drift := elapsed - expectedTime
+
+				log.Printf("Sent %d frames | Elapsed: %.2fs | Expected: %.2fs | Drift: %.3fs | File: %s",
+					framesSent, elapsed, expectedTime, drift, filepath)
 			}
-
-			// Move to next frame, loop back to start if at end
-			frameIndex = (frameIndex + 1) % len(v.frameFiles)
 		}
 	}
 }
 
-func (v *VideoStreamer) readH264File(filepath string) ([]byte, error) {
-	file, err := os.Open(filepath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %v", err)
-	}
-	defer file.Close()
+func (v *VideoStreamer) convertToAnnexB(data []byte) []byte {
+	// Convert length-prefixed format to Annex B format for WebRTC
+	var result []byte
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %v", err)
+	i := 0
+	for i < len(data) {
+		if i+4 > len(data) {
+			break
+		}
+
+		// Read 4-byte length (big-endian)
+		length := binary.BigEndian.Uint32(data[i:i+4])
+		naluStartIndex := i + 4
+		naluEndIndex := naluStartIndex + int(length)
+
+		if naluEndIndex > len(data) {
+			break
+		}
+
+		// Append start code and NAL unit data
+		result = append(result, startCode...)
+		result = append(result, data[naluStartIndex:naluEndIndex]...)
+
+		i = naluEndIndex
 	}
 
-	return data, nil
+	return result
 }
 
-func (v *VideoStreamer) StopStreaming() {
-	if v.isStreaming {
-		v.stopChan <- true
-	}
+func getCurrentTimeMicroseconds() uint64 {
+	return uint64(time.Now().UnixNano() / 1000)
 }

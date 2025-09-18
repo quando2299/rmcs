@@ -1,183 +1,234 @@
 package main
 
 import (
-	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
 )
 
-// NAL unit types
 const (
-	NAL_UNIT_TYPE_SPS = 7
-	NAL_UNIT_TYPE_PPS = 8
-	NAL_UNIT_TYPE_IDR = 5
-	NAL_UNIT_TYPE_NON_IDR = 1
+	NAL_TYPE_NON_IDR = 1  // Non-IDR slice
+	NAL_TYPE_IDR     = 5  // IDR Frame
+	NAL_TYPE_SEI     = 6  // Supplemental Enhancement Information
+	NAL_TYPE_SPS     = 7  // Sequence Parameter Set
+	NAL_TYPE_PPS     = 8  // Picture Parameter Set
+	NAL_TYPE_AUD     = 9  // Access Unit Delimiter
 )
 
-// H264Parser helps parse H.264 NAL units from raw data
-type H264Parser struct {
-	sps []byte
-	pps []byte
+type NALUnit struct {
+	Type      uint8
+	Data      []byte
+	Timestamp time.Duration
 }
 
-// FindNALUnits splits H.264 data into individual NAL units
-// This handles MP4/MOV format with length-prefixed NAL units
-func (p *H264Parser) FindNALUnits(data []byte) [][]byte {
-	// Check if this is Annex-B format (with start codes) or MP4 format (length-prefixed)
-	if p.isAnnexBFormat(data) {
-		return p.parseAnnexBFormat(data)
-	} else {
-		return p.parseLengthPrefixedFormat(data)
-	}
+type H264Sample struct {
+	NALUnits  []NALUnit
+	Timestamp time.Duration
+	IsKeyFrame bool
 }
 
-// Check if data uses Annex-B format (starts with 0x00000001 or 0x000001)
-func (p *H264Parser) isAnnexBFormat(data []byte) bool {
-	if len(data) < 4 {
-		return false
-	}
+type H264FileParser struct {
+	files       []string
+	currentFile int
+	fps         float64
+	frameDuration time.Duration
+	frameNumber int64
+	loop        bool
 
-	// Check for 4-byte start code
-	if data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01 {
-		return true
-	}
-
-	// Check for 3-byte start code
-	if len(data) >= 3 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01 {
-		return true
-	}
-
-	return false
+	// Store important NAL units for initialization
+	sps *NALUnit
+	pps *NALUnit
+	idr *NALUnit
 }
 
-// Parse MP4/MOV format with length-prefixed NAL units
-func (p *H264Parser) parseLengthPrefixedFormat(data []byte) [][]byte {
-	var nalUnits [][]byte
+func NewH264FileParser(directory string, fps float64, loop bool) (*H264FileParser, error) {
+	// Read all .h264 files from directory
+	files, err := filepath.Glob(filepath.Join(directory, "*.h264"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read H.264 files: %w", err)
+	}
 
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no H.264 files found in directory: %s", directory)
+	}
+
+	// Sort files to ensure consistent order
+	sort.Strings(files)
+
+	log.Printf("Found %d H.264 files in %s", len(files), directory)
+
+	return &H264FileParser{
+		files:         files,
+		currentFile:   0,
+		fps:           fps,
+		frameDuration: time.Duration(float64(time.Second) / fps),
+		frameNumber:   0,
+		loop:          loop,
+	}, nil
+}
+
+// ParseNALUnits parses NAL units from H.264 file data
+func (p *H264FileParser) ParseNALUnits(data []byte) ([]NALUnit, error) {
+	var nalUnits []NALUnit
 	i := 0
+
 	for i < len(data) {
-		// Need at least 4 bytes for length prefix
+		// Check if we have enough data for length
 		if i+4 > len(data) {
 			break
 		}
 
-		// Read 4-byte length (big endian)
-		length := int(data[i])<<24 | int(data[i+1])<<16 | int(data[i+2])<<8 | int(data[i+3])
+		// Read 4-byte length prefix (big-endian)
+		length := binary.BigEndian.Uint32(data[i:i+4])
 		i += 4
 
-		// Check if we have enough data for this NAL unit
-		if i+length > len(data) || length <= 0 {
+		// Check if we have enough data for the NAL unit
+		if i+int(length) > len(data) {
+			log.Printf("Warning: Incomplete NAL unit at position %d", i)
 			break
 		}
 
 		// Extract NAL unit
-		nalUnit := make([]byte, length)
-		copy(nalUnit, data[i:i+length])
-		nalUnits = append(nalUnits, nalUnit)
+		nalData := data[i:i+int(length)]
+		i += int(length)
 
-		i += length
-	}
-
-	return nalUnits
-}
-
-// Parse Annex-B format with start codes
-func (p *H264Parser) parseAnnexBFormat(data []byte) [][]byte {
-	var nalUnits [][]byte
-
-	// Look for NAL unit start codes (0x00000001 or 0x000001)
-	for i := 0; i < len(data)-3; {
-		// Check for 4-byte start code (0x00000001)
-		if data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01 {
-			start := i + 4
-
-			// Find next NAL unit or end of data
-			nextStart := p.findNextStartCode(data, start)
-			if nextStart == -1 {
-				nextStart = len(data)
-			}
-
-			if nextStart > start {
-				nalUnits = append(nalUnits, data[start:nextStart])
-			}
-			i = nextStart
-		} else if data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x01 {
-			// Check for 3-byte start code (0x000001)
-			start := i + 3
-
-			// Find next NAL unit or end of data
-			nextStart := p.findNextStartCode(data, start)
-			if nextStart == -1 {
-				nextStart = len(data)
-			}
-
-			if nextStart > start {
-				nalUnits = append(nalUnits, data[start:nextStart])
-			}
-			i = nextStart
-		} else {
-			i++
-		}
-	}
-
-	return nalUnits
-}
-
-func (p *H264Parser) findNextStartCode(data []byte, start int) int {
-	for i := start; i < len(data)-3; i++ {
-		if data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01 {
-			return i
-		}
-		if data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x01 {
-			return i
-		}
-	}
-	return -1
-}
-
-// ProcessNALUnits processes NAL units and extracts SPS/PPS
-func (p *H264Parser) ProcessNALUnits(nalUnits [][]byte) [][]byte {
-	var processedUnits [][]byte
-
-	for _, nalUnit := range nalUnits {
-		if len(nalUnit) == 0 {
+		if len(nalData) == 0 {
 			continue
 		}
 
-		nalType := nalUnit[0] & 0x1F
+		// Parse NAL header to get type
+		nalType := nalData[0] & 0x1F
 
+		nalUnit := NALUnit{
+			Type: nalType,
+			Data: nalData,
+			Timestamp: p.frameDuration * time.Duration(p.frameNumber),
+		}
+
+		nalUnits = append(nalUnits, nalUnit)
+
+		// Store important NAL units for stream initialization
 		switch nalType {
-		case NAL_UNIT_TYPE_SPS:
-			p.sps = make([]byte, len(nalUnit))
-			copy(p.sps, nalUnit)
-			processedUnits = append(processedUnits, nalUnit)
-		case NAL_UNIT_TYPE_PPS:
-			p.pps = make([]byte, len(nalUnit))
-			copy(p.pps, nalUnit)
-			processedUnits = append(processedUnits, nalUnit)
-		case NAL_UNIT_TYPE_IDR, NAL_UNIT_TYPE_NON_IDR:
-			// For IDR frames, prepend SPS and PPS
-			if nalType == NAL_UNIT_TYPE_IDR && len(p.sps) > 0 && len(p.pps) > 0 {
-				processedUnits = append(processedUnits, p.sps)
-				processedUnits = append(processedUnits, p.pps)
-			}
-			processedUnits = append(processedUnits, nalUnit)
-		default:
-			processedUnits = append(processedUnits, nalUnit)
+		case NAL_TYPE_SPS:
+			p.sps = &nalUnit
+			log.Println("Found SPS NAL unit")
+		case NAL_TYPE_PPS:
+			p.pps = &nalUnit
+			log.Println("Found PPS NAL unit")
+		case NAL_TYPE_IDR:
+			p.idr = &nalUnit
+			log.Println("Found IDR frame")
 		}
 	}
 
-	return processedUnits
+	return nalUnits, nil
 }
 
-// ConvertToAnnexB converts NAL units back to Annex B format with start codes
-func (p *H264Parser) ConvertToAnnexB(nalUnits [][]byte) []byte {
-	var buffer bytes.Buffer
+// GetInitialNALUnits returns SPS, PPS, and IDR for stream initialization
+func (p *H264FileParser) GetInitialNALUnits() []NALUnit {
+	var initial []NALUnit
 
-	startCode := []byte{0x00, 0x00, 0x00, 0x01}
-
-	for _, nalUnit := range nalUnits {
-		buffer.Write(startCode)
-		buffer.Write(nalUnit)
+	// Always send SPS first, then PPS, then IDR
+	// This order is critical for H.264 decoders
+	if p.sps != nil {
+		// Create a fresh copy to avoid timing issues
+		spsCopy := NALUnit{
+			Type: p.sps.Type,
+			Data: append([]byte(nil), p.sps.Data...),
+			Timestamp: p.frameDuration * time.Duration(p.frameNumber),
+		}
+		initial = append(initial, spsCopy)
+	}
+	if p.pps != nil {
+		ppsCopy := NALUnit{
+			Type: p.pps.Type,
+			Data: append([]byte(nil), p.pps.Data...),
+			Timestamp: p.frameDuration * time.Duration(p.frameNumber),
+		}
+		initial = append(initial, ppsCopy)
+	}
+	if p.idr != nil {
+		idrCopy := NALUnit{
+			Type: p.idr.Type,
+			Data: append([]byte(nil), p.idr.Data...),
+			Timestamp: p.frameDuration * time.Duration(p.frameNumber),
+		}
+		initial = append(initial, idrCopy)
 	}
 
-	return buffer.Bytes()
+	return initial
+}
+
+// NextSample reads and parses the next H.264 sample
+func (p *H264FileParser) NextSample() (*H264Sample, error) {
+	if p.currentFile >= len(p.files) {
+		if p.loop {
+			p.currentFile = 0
+			// Don't reset frameNumber to maintain timing continuity
+			log.Println("Looping video files")
+		} else {
+			return nil, io.EOF
+		}
+	}
+
+	// Read current file
+	data, err := os.ReadFile(p.files[p.currentFile])
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file %s: %w", p.files[p.currentFile], err)
+	}
+
+	// Parse NAL units
+	nalUnits, err := p.ParseNALUnits(data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if this is a keyframe (contains IDR)
+	isKeyFrame := false
+	for _, nal := range nalUnits {
+		if nal.Type == NAL_TYPE_IDR {
+			isKeyFrame = true
+			break
+		}
+	}
+
+	sample := &H264Sample{
+		NALUnits:   nalUnits,
+		Timestamp:  p.frameDuration * time.Duration(p.frameNumber),
+		IsKeyFrame: isKeyFrame,
+	}
+
+	p.currentFile++
+	p.frameNumber++
+
+	return sample, nil
+}
+
+// ConvertNALUnitsToAnnexB converts NAL units to Annex B format for WebRTC
+func ConvertNALUnitsToAnnexB(nalUnits []NALUnit) []byte {
+	var result []byte
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
+
+	for _, nal := range nalUnits {
+		result = append(result, startCode...)
+		result = append(result, nal.Data...)
+	}
+
+	return result
+}
+
+// GetFrameDuration returns the duration of a single frame
+func (p *H264FileParser) GetFrameDuration() time.Duration {
+	return p.frameDuration
+}
+
+// Reset resets the parser to the beginning
+func (p *H264FileParser) Reset() {
+	p.currentFile = 0
+	p.frameNumber = 0
 }
