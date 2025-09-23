@@ -63,9 +63,10 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	// Create proper video streamer based on libdatachannel C++ reference
 	videoStreamer := NewVideoStreamer(videoTrack)
 
-	// Load H.264 files
-	if err := videoStreamer.LoadH264Files("leopard_id4_image_resized_30fps"); err != nil {
-		log.Printf("Warning: Failed to load H.264 files: %v", err)
+	// Load H.264 files WITH SEI timestamps
+	if err := videoStreamer.LoadH264Files("h264_files_with_flutter_sei"); err != nil {
+		log.Printf("ERROR: Failed to load H.264 files: %v", err)
+		// Don't continue if no files found
 	}
 
 	// Start streaming when connection is established

@@ -193,6 +193,12 @@ func (v *VideoStreamer) StopStreaming() {
 func (v *VideoStreamer) streamLoop() {
 	log.Println("Starting proper video stream with microsecond timing")
 
+	// Safety check - no files to stream
+	if len(v.frameFiles) == 0 {
+		log.Println("ERROR: No H264 files loaded, cannot stream")
+		return
+	}
+
 	// Send initial NAL units immediately
 	if initialData := v.getInitialNALUnits(); len(initialData) > 0 {
 		v.track.WriteSample(media.Sample{

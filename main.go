@@ -14,20 +14,20 @@ import (
 )
 
 const (
-	broker     = "test.rmcs.d6-vnext.com"
-	port       = 1883
-	username   = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
-	password   = "7#TlDprf"
-	thingName  = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
-	clientID   = "go-backend-rmcs-client"
-	baseTopic  = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af/robot-control"
+	broker    = "test.rmcs.d6-vnext.com"
+	port      = 1883
+	username  = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
+	password  = "7#TlDprf"
+	thingName = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
+	clientID  = "go-backend-rmcs-client"
+	baseTopic = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af/robot-control"
 )
 
 func main() {
 	mqtt.ERROR = log.New(os.Stdout, "[ERROR] ", 0)
-	mqtt.CRITICAL = log.New(os.Stdout, "[CRITICAL] ", 0)
-	mqtt.WARN = log.New(os.Stdout, "[WARN] ", 0)
-	mqtt.DEBUG = log.New(os.Stdout, "[DEBUG] ", 0)
+	// mqtt.CRITICAL = log.New(os.Stdout, "[CRITICAL] ", 0)
+	// mqtt.WARN = log.New(os.Stdout, "[WARN] ", 0)
+	// mqtt.DEBUG = log.New(os.Stdout, "[DEBUG] ", 0)
 
 	// Initialize WebRTC manager
 	webrtcManager, err := NewWebRTCManager()
@@ -38,7 +38,6 @@ func main() {
 
 	// Store current peer ID from offer topic
 	var currentPeerID string
-
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", broker, port))
@@ -58,7 +57,6 @@ func main() {
 
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		log.Println("Connected to MQTT Broker successfully!")
-
 
 		// Setup ICE candidate handler to send backend's candidates to frontend
 		webrtcManager.SetupICECandidateHandler(func(candidate *webrtc.ICECandidate) {
