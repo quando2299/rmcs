@@ -58,6 +58,35 @@ func main() {
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		log.Println("Connected to MQTT Broker successfully!")
 
+		// Subscribe to camera topic to handle camera switching
+		cameraTopic := fmt.Sprintf("%s/camera", thingName)
+		cameraToken := client.Subscribe(cameraTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
+			log.Printf("Camera switch request received on topic %s: %s", msg.Topic(), string(msg.Payload()))
+
+			// Parse camera number from message
+			var cameraNumber int
+			_, err := fmt.Sscanf(string(msg.Payload()), "%d", &cameraNumber)
+			if err != nil {
+				log.Printf("Failed to parse camera number from message: %v", err)
+				return
+			}
+
+			log.Printf("Parsed camera number: %d", cameraNumber)
+
+			// Switch to requested camera
+			if err := webrtcManager.SwitchCamera(cameraNumber); err != nil {
+				log.Printf("Failed to switch camera: %v", err)
+			} else {
+				log.Printf("Successfully switched to camera %d", cameraNumber)
+			}
+		})
+
+		if cameraToken.Wait() && cameraToken.Error() != nil {
+			log.Printf("Failed to subscribe to %s: %v", cameraTopic, cameraToken.Error())
+		} else {
+			log.Printf("Subscribed to camera topic: %s", cameraTopic)
+		}
+
 		// Setup ICE candidate handler to send backend's candidates to frontend
 		webrtcManager.SetupICECandidateHandler(func(candidate *webrtc.ICECandidate) {
 			if candidate == nil {
@@ -94,13 +123,13 @@ func main() {
 		// Subscribe to offer topic to receive offers from frontend
 		offerTopic := fmt.Sprintf("%s/+/offer", baseTopic)
 		token := client.Subscribe(offerTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
-			log.Printf("Offer received on topic %s: %s", msg.Topic(), string(msg.Payload()))
+			log.Printf("Offer received on topic %s", msg.Topic())
 
 			// Extract peer ID from topic
-			topicParts := make([]string, 0)
-			for _, part := range []byte(msg.Topic()) {
-				topicParts = append(topicParts, string(part))
-			}
+			// topicParts := make([]string, 0)
+			// for _, part := range []byte(msg.Topic()) {
+			// 	topicParts = append(topicParts, string(part))
+			// }
 			topicStr := string(msg.Topic())
 			// Parse topic to get peer ID: baseTopic/peerId/offer
 			baseLen := len(baseTopic) + 1 // +1 for the /
@@ -131,15 +160,13 @@ func main() {
 			token := client.Publish(answerTopic, 0, false, []byte(answerSDP))
 			if token.Wait() && token.Error() != nil {
 				log.Printf("Failed to send answer: %v", token.Error())
-			} else {
-				log.Printf("Real WebRTC answer sent successfully to topic: %s", answerTopic)
 			}
 		})
 
 		// Subscribe to robot ICE candidate topic
 		robotCandidateTopic := fmt.Sprintf("%s/+/candidate/robot", baseTopic)
 		iceToken := client.Subscribe(robotCandidateTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
-			log.Printf("ICE candidate received on topic %s: %s", msg.Topic(), string(msg.Payload()))
+			// log.Printf("ICE candidate received on topic %s: %s", msg.Topic(), string(msg.Payload()))
 
 			// Flutter sends ICE candidates as JSON array
 			var iceCandidates []ICECandidateMessage

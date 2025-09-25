@@ -19,28 +19,28 @@ import (
 
 // NAL unit types based on C++ reference
 const (
-	NAL_SPS = 7  // Sequence Parameter Set
-	NAL_PPS = 8  // Picture Parameter Set
-	NAL_IDR = 5  // IDR frame
+	NAL_SPS = 7 // Sequence Parameter Set
+	NAL_PPS = 8 // Picture Parameter Set
+	NAL_IDR = 5 // IDR frame
 )
 
 type VideoStreamer struct {
-	track         *webrtc.TrackLocalStaticSample
-	frameFiles    []string
-	isStreaming   bool
-	stopChan      chan bool
-	mu            sync.Mutex
+	track       *webrtc.TrackLocalStaticSample
+	frameFiles  []string
+	isStreaming bool
+	stopChan    chan bool
+	mu          sync.Mutex
 
 	// Cached NAL units like C++ implementation
-	sps           []byte  // Type 7
-	pps           []byte  // Type 8
-	lastIDR       []byte  // Type 5
+	sps     []byte // Type 7
+	pps     []byte // Type 8
+	lastIDR []byte // Type 5
 
 	// Timing management
-	fps           uint32
-	sampleDurationUs uint64  // microseconds per frame
-	sampleTimeUs  uint64     // current sample timestamp in microseconds
-	frameCounter  int
+	fps              uint32
+	sampleDurationUs uint64 // microseconds per frame
+	sampleTimeUs     uint64 // current sample timestamp in microseconds
+	frameCounter     int
 }
 
 func NewVideoStreamer(track *webrtc.TrackLocalStaticSample) *VideoStreamer {
@@ -55,6 +55,9 @@ func NewVideoStreamer(track *webrtc.TrackLocalStaticSample) *VideoStreamer {
 }
 
 func (v *VideoStreamer) LoadH264Files(directory string) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
 	files, err := filepath.Glob(filepath.Join(directory, "*.h264"))
 	if err != nil {
 		return err
@@ -78,6 +81,9 @@ func (v *VideoStreamer) LoadH264Files(directory string) error {
 	if len(files) > 0 {
 		v.parseInitialNALUnits(files[0])
 	}
+
+	// Reset frame counter to start from beginning with new files
+	v.frameCounter = -1
 
 	return nil
 }
@@ -107,7 +113,7 @@ func (v *VideoStreamer) parseInitialNALUnits(filepath string) error {
 		}
 
 		// Read 4-byte length (big-endian)
-		length := binary.BigEndian.Uint32(data[i:i+4])
+		length := binary.BigEndian.Uint32(data[i : i+4])
 		naluStartIndex := i + 4
 		naluEndIndex := naluStartIndex + int(length)
 
@@ -194,10 +200,13 @@ func (v *VideoStreamer) streamLoop() {
 	log.Println("Starting proper video stream with microsecond timing")
 
 	// Safety check - no files to stream
+	v.mu.Lock()
 	if len(v.frameFiles) == 0 {
+		v.mu.Unlock()
 		log.Println("ERROR: No H264 files loaded, cannot stream")
 		return
 	}
+	v.mu.Unlock()
 
 	// Send initial NAL units immediately
 	if initialData := v.getInitialNALUnits(); len(initialData) > 0 {
@@ -205,14 +214,14 @@ func (v *VideoStreamer) streamLoop() {
 			Data:     initialData,
 			Duration: time.Duration(v.sampleDurationUs) * time.Microsecond,
 		})
-		log.Printf("Sent initial NAL units (%d bytes)", len(initialData))
+		// log.Printf("Sent initial NAL units (%d bytes)", len(initialData))
 	}
 
 	// Create ticker with microsecond precision
 	ticker := time.NewTicker(time.Duration(v.sampleDurationUs) * time.Microsecond)
 	defer ticker.Stop()
 
-	startTime := time.Now()
+	// startTime := time.Now()
 	framesSent := 0
 
 	for {
@@ -222,6 +231,7 @@ func (v *VideoStreamer) streamLoop() {
 			return
 
 		case <-ticker.C:
+			v.mu.Lock()
 			v.frameCounter++
 			if v.frameCounter >= len(v.frameFiles) {
 				if v.frameCounter > 0 {
@@ -233,6 +243,7 @@ func (v *VideoStreamer) streamLoop() {
 
 			// Read frame file
 			filepath := v.frameFiles[v.frameCounter]
+			v.mu.Unlock()
 			data, err := os.ReadFile(filepath)
 			if err != nil {
 				log.Printf("Failed to read frame %d: %v", v.frameCounter, err)
@@ -263,14 +274,14 @@ func (v *VideoStreamer) streamLoop() {
 			framesSent++
 
 			// Log progress
-			if framesSent%30 == 0 {
-				elapsed := time.Since(startTime).Seconds()
-				expectedTime := float64(framesSent) / float64(v.fps)
-				drift := elapsed - expectedTime
+			// if framesSent%30 == 0 {
+			// 	elapsed := time.Since(startTime).Seconds()
+			// 	expectedTime := float64(framesSent) / float64(v.fps)
+			// 	drift := elapsed - expectedTime
 
-				log.Printf("Sent %d frames | Elapsed: %.2fs | Expected: %.2fs | Drift: %.3fs | File: %s",
-					framesSent, elapsed, expectedTime, drift, filepath)
-			}
+			// 	log.Printf("Sent %d frames | Elapsed: %.2fs | Expected: %.2fs | Drift: %.3fs | File: %s",
+			// 		framesSent, elapsed, expectedTime, drift, filepath)
+			// }
 		}
 	}
 }
@@ -287,7 +298,7 @@ func (v *VideoStreamer) convertToAnnexB(data []byte) []byte {
 		}
 
 		// Read 4-byte length (big-endian)
-		length := binary.BigEndian.Uint32(data[i:i+4])
+		length := binary.BigEndian.Uint32(data[i : i+4])
 		naluStartIndex := i + 4
 		naluEndIndex := naluStartIndex + int(length)
 
@@ -305,6 +316,6 @@ func (v *VideoStreamer) convertToAnnexB(data []byte) []byte {
 	return result
 }
 
-func getCurrentTimeMicroseconds() uint64 {
-	return uint64(time.Now().UnixNano() / 1000)
-}
+// func getCurrentTimeMicroseconds() uint64 {
+// 	return uint64(time.Now().UnixNano() / 1000)
+// }

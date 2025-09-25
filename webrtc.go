@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/pion/webrtc/v4"
@@ -63,10 +64,25 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	// Create proper video streamer based on libdatachannel C++ reference
 	videoStreamer := NewVideoStreamer(videoTrack)
 
-	// Load H.264 files WITH SEI timestamps
-	if err := videoStreamer.LoadH264Files("h264_files_with_flutter_sei"); err != nil {
-		log.Printf("ERROR: Failed to load H.264 files: %v", err)
-		// Don't continue if no files found
+	// Load default camera (camera 1)
+	defaultCamera := 1
+	cameraMap := map[int]string{
+		1: "h264_files_with_flutter_sei_flir_id8_image_resized",
+		2: "h264_files_with_flutter_sei_leopard_id1_image_resized",
+		3: "h264_files_with_flutter_sei_leopard_id3_image_resized",
+		4: "h264_files_with_flutter_sei_leopard_id4_image_resized",
+		5: "h264_files_with_flutter_sei_leopard_id5_image_resized",
+		6: "h264_files_with_flutter_sei_leopard_id6_image_resized",
+		7: "h264_files_with_flutter_sei_leopard_id7_image_resized",
+	}
+
+	if defaultDir, ok := cameraMap[defaultCamera]; ok {
+		if err := videoStreamer.LoadH264Files(defaultDir); err != nil {
+			log.Printf("ERROR: Failed to load default camera %d files: %v", defaultCamera, err)
+			// Don't continue if no files found
+		} else {
+			log.Printf("Loaded default camera %d: %s", defaultCamera, defaultDir)
+		}
 	}
 
 	// Start streaming when connection is established
@@ -130,7 +146,7 @@ func (w *WebRTCManager) AddICECandidate(candidateData ICECandidateMessage) error
 		return err
 	}
 
-	log.Println("Added ICE candidate")
+	// log.Println("Added ICE candidate")
 	return nil
 }
 
@@ -140,6 +156,36 @@ func (w *WebRTCManager) SetupICECandidateHandler(handler func(*webrtc.ICECandida
 			handler(candidate)
 		}
 	})
+}
+
+func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
+	log.Printf("SwitchCamera called with camera number: %d", cameraNumber)
+
+	// Map camera numbers to directories
+	cameraMap := map[int]string{
+		1: "h264_files_with_flutter_sei_flir_id8_image_resized",
+		2: "h264_files_with_flutter_sei_leopard_id1_image_resized",
+		3: "h264_files_with_flutter_sei_leopard_id3_image_resized",
+		4: "h264_files_with_flutter_sei_leopard_id4_image_resized",
+		5: "h264_files_with_flutter_sei_leopard_id5_image_resized",
+		6: "h264_files_with_flutter_sei_leopard_id6_image_resized",
+		7: "h264_files_with_flutter_sei_leopard_id7_image_resized",
+	}
+
+	directory, ok := cameraMap[cameraNumber]
+	if !ok {
+		return fmt.Errorf("invalid camera number: %d (must be 1-7)", cameraNumber)
+	}
+
+	log.Printf("Switching to camera %d: %s", cameraNumber, directory)
+
+	// Load new H.264 files
+	if err := w.videoStreamer.LoadH264Files(directory); err != nil {
+		return fmt.Errorf("failed to load camera %d files: %v", cameraNumber, err)
+	}
+
+	log.Printf("Successfully loaded files for camera %d from: %s", cameraNumber, directory)
+	return nil
 }
 
 func (w *WebRTCManager) Close() error {
