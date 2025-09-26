@@ -40,21 +40,19 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		return nil, err
 	}
 
-
-
 	// Create proper video streamer based on libdatachannel C++ reference
 	videoStreamer := NewVideoStreamer(videoTrack)
 
 	// Load default camera (camera 1)
 	defaultCamera := 1
 	cameraMap := map[int]string{
-		1: "h264_files_with_flutter_sei_flir_id8_image_resized",
-		2: "h264_files_with_flutter_sei_leopard_id1_image_resized",
-		3: "h264_files_with_flutter_sei_leopard_id3_image_resized",
-		4: "h264_files_with_flutter_sei_leopard_id4_image_resized",
-		5: "h264_files_with_flutter_sei_leopard_id5_image_resized",
-		6: "h264_files_with_flutter_sei_leopard_id6_image_resized",
-		7: "h264_files_with_flutter_sei_leopard_id7_image_resized",
+		1: "h264/flir_id8_image_resized",
+		2: "h264/leopard_id1_image_resized",
+		3: "h264/leopard_id3_image_resized",
+		4: "h264/leopard_id4_image_resized",
+		5: "h264/leopard_id5_image_resized",
+		6: "h264/leopard_id6_image_resized",
+		7: "h264/leopard_id7_image_resized",
 	}
 
 	if defaultDir, ok := cameraMap[defaultCamera]; ok {
@@ -213,13 +211,13 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 
 	// Map camera numbers to directories
 	cameraMap := map[int]string{
-		1: "h264_files_with_flutter_sei_flir_id8_image_resized",
-		2: "h264_files_with_flutter_sei_leopard_id1_image_resized",
-		3: "h264_files_with_flutter_sei_leopard_id3_image_resized",
-		4: "h264_files_with_flutter_sei_leopard_id4_image_resized",
-		5: "h264_files_with_flutter_sei_leopard_id5_image_resized",
-		6: "h264_files_with_flutter_sei_leopard_id6_image_resized",
-		7: "h264_files_with_flutter_sei_leopard_id7_image_resized",
+		1: "h264/flir_id8_image_resized",
+		2: "h264/leopard_id1_image_resized",
+		3: "h264/leopard_id3_image_resized",
+		4: "h264/leopard_id4_image_resized",
+		5: "h264/leopard_id5_image_resized",
+		6: "h264/leopard_id6_image_resized",
+		7: "h264/leopard_id7_image_resized",
 	}
 
 	directory, ok := cameraMap[cameraNumber]

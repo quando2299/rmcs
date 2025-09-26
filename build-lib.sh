@@ -4,6 +4,9 @@
 
 echo "Building RMCS C-shared library..."
 
+# Copy h264 folders for streaming
+mv ../bag_processor/h264/ .
+
 # Navigate to lib directory
 cd lib
 
@@ -20,8 +23,8 @@ if [ $? -eq 0 ]; then
     cd ..
 
     # Copy to root for backward compatibility (optional)
-    # cp build/librmcs.so librmcs.so
-    # cp build/librmcs.h librmcs.h
+    cp build/librmcs.so librmcs.so
+    cp build/librmcs.h librmcs.h
 
     echo "Files also copied to root directory for compatibility"
 else
