@@ -3,14 +3,16 @@ package main
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/pion/webrtc/v4"
 )
 
 type WebRTCManager struct {
-	peerConnection *webrtc.PeerConnection
-	videoTrack     *webrtc.TrackLocalStaticSample
-	videoStreamer  *VideoStreamer
+	peerConnections map[string]*webrtc.PeerConnection
+	videoTrack      *webrtc.TrackLocalStaticSample
+	videoStreamer   *VideoStreamer
+	mu              sync.Mutex
 }
 
 // ICECandidateMessage represents an ICE candidate from Flutter
@@ -21,18 +23,7 @@ type ICECandidateMessage struct {
 }
 
 func NewWebRTCManager() (*WebRTCManager, error) {
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
-	}
-
-	peerConnection, err := webrtc.NewPeerConnection(config)
-	if err != nil {
-		return nil, err
-	}
+	// We'll create peer connections on demand now
 
 	// Create a video track for H264 with proper codec parameters
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
@@ -49,17 +40,7 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		return nil, err
 	}
 
-	// Add the video track to the peer connection
-	_, err = peerConnection.AddTrack(videoTrack)
-	if err != nil {
-		return nil, err
-	}
 
-	// Set up connection state handlers
-
-	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		log.Printf("ICE connection state changed: %s", state.String())
-	})
 
 	// Create proper video streamer based on libdatachannel C++ reference
 	videoStreamer := NewVideoStreamer(videoTrack)
@@ -85,47 +66,98 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		}
 	}
 
-	// Start streaming when connection is established
-	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		log.Printf("WebRTC connection state changed: %s", state.String())
-
-		switch state {
-		case webrtc.PeerConnectionStateConnected:
-			log.Println("WebRTC connected, starting video stream")
-			videoStreamer.StartStreaming()
-		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
-			log.Println("WebRTC disconnected, stopping video stream")
-			videoStreamer.StopStreaming()
-		}
-	})
-
 	return &WebRTCManager{
-		peerConnection: peerConnection,
-		videoTrack:     videoTrack,
-		videoStreamer:  videoStreamer,
+		peerConnections: make(map[string]*webrtc.PeerConnection),
+		videoTrack:      videoTrack,
+		videoStreamer:   videoStreamer,
 	}, nil
 }
 
-func (w *WebRTCManager) ProcessOffer(offerSDP string) (string, error) {
+func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Close existing connection if any
+	if existingPC, exists := w.peerConnections[peerID]; exists {
+		log.Printf("Closing existing peer connection for %s", peerID)
+		existingPC.Close()
+	}
+
+	// Create new peer connection
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{
+				URLs: []string{"stun:stun.l.google.com:19302"},
+			},
+		},
+	}
+
+	peerConnection, err := webrtc.NewPeerConnection(config)
+	if err != nil {
+		return "", err
+	}
+
+	// Add the video track to the new peer connection
+	_, err = peerConnection.AddTrack(w.videoTrack)
+	if err != nil {
+		peerConnection.Close()
+		return "", err
+	}
+
+	// Set up connection state handlers
+	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("[%s] ICE connection state changed: %s", peerID, state.String())
+	})
+
+	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("[%s] WebRTC connection state changed: %s", peerID, state.String())
+
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			log.Printf("[%s] WebRTC connected, starting video stream", peerID)
+			w.videoStreamer.StartStreaming()
+		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
+			log.Printf("[%s] WebRTC disconnected", peerID)
+			// Check if any peers are still connected
+			w.mu.Lock()
+			hasConnected := false
+			for id, pc := range w.peerConnections {
+				if id != peerID && pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+					hasConnected = true
+					break
+				}
+			}
+			w.mu.Unlock()
+
+			if !hasConnected {
+				log.Println("No peers connected, stopping video stream")
+				w.videoStreamer.StopStreaming()
+			}
+		}
+	})
+
+	// Store the peer connection
+	w.peerConnections[peerID] = peerConnection
+
 	offer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeOffer,
 		SDP:  offerSDP,
 	}
 
 	// Set the remote description (offer)
-	err := w.peerConnection.SetRemoteDescription(offer)
+	err = peerConnection.SetRemoteDescription(offer)
 	if err != nil {
 		return "", err
 	}
 
 	// Create an answer
-	answer, err := w.peerConnection.CreateAnswer(nil)
+	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
 		return "", err
 	}
 
 	// Set the local description (answer)
-	err = w.peerConnection.SetLocalDescription(answer)
+	err = peerConnection.SetLocalDescription(answer)
 	if err != nil {
 		return "", err
 	}
@@ -134,14 +166,23 @@ func (w *WebRTCManager) ProcessOffer(offerSDP string) (string, error) {
 	return answer.SDP, nil
 }
 
-func (w *WebRTCManager) AddICECandidate(candidateData ICECandidateMessage) error {
+func (w *WebRTCManager) AddICECandidate(peerID string, candidateData ICECandidateMessage) error {
+	w.mu.Lock()
+	peerConnection, exists := w.peerConnections[peerID]
+	w.mu.Unlock()
+
+	if !exists {
+		log.Printf("No peer connection found for %s", peerID)
+		return fmt.Errorf("no peer connection for %s", peerID)
+	}
+
 	candidate := webrtc.ICECandidateInit{
 		Candidate:     candidateData.Candidate,
 		SDPMid:        &candidateData.SDPMid,
 		SDPMLineIndex: &candidateData.SDPMLineIndex,
 	}
 
-	err := w.peerConnection.AddICECandidate(candidate)
+	err := peerConnection.AddICECandidate(candidate)
 	if err != nil {
 		return err
 	}
@@ -150,8 +191,17 @@ func (w *WebRTCManager) AddICECandidate(candidateData ICECandidateMessage) error
 	return nil
 }
 
-func (w *WebRTCManager) SetupICECandidateHandler(handler func(*webrtc.ICECandidate)) {
-	w.peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+func (w *WebRTCManager) SetupICECandidateHandler(peerID string, handler func(*webrtc.ICECandidate)) {
+	w.mu.Lock()
+	peerConnection, exists := w.peerConnections[peerID]
+	w.mu.Unlock()
+
+	if !exists {
+		log.Printf("No peer connection found for %s when setting up ICE handler", peerID)
+		return
+	}
+
+	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			handler(candidate)
 		}
@@ -188,9 +238,46 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 	return nil
 }
 
-func (w *WebRTCManager) Close() error {
-	if w.peerConnection != nil {
-		return w.peerConnection.Close()
+func (w *WebRTCManager) DisconnectPeer(peerID string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if peerConnection, exists := w.peerConnections[peerID]; exists {
+		log.Printf("Disconnecting peer: %s", peerID)
+		err := peerConnection.Close()
+		delete(w.peerConnections, peerID)
+
+		// Check if any peers are still connected
+		hasConnected := false
+		for _, pc := range w.peerConnections {
+			if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+				hasConnected = true
+				break
+			}
+		}
+
+		if !hasConnected {
+			log.Println("No peers connected after disconnect, stopping video stream")
+			w.videoStreamer.StopStreaming()
+		}
+
+		return err
 	}
+
+	log.Printf("Peer %s not found", peerID)
+	return nil
+}
+
+func (w *WebRTCManager) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	for peerID, peerConnection := range w.peerConnections {
+		log.Printf("Closing peer connection: %s", peerID)
+		peerConnection.Close()
+	}
+
+	w.peerConnections = make(map[string]*webrtc.PeerConnection)
+	w.videoStreamer.StopStreaming()
 	return nil
 }

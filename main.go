@@ -1,3 +1,6 @@
+//go:build !library
+// +build !library
+
 package main
 
 import (
@@ -11,16 +14,6 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/pion/webrtc/v4"
-)
-
-const (
-	broker    = "test.rmcs.d6-vnext.com"
-	port      = 1883
-	username  = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
-	password  = "7#TlDprf"
-	thingName = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af"
-	clientID  = "go-backend-rmcs-client"
-	baseTopic = "vnext-test_b6239876-943a-4d6f-a7ef-f1440d5c58af/robot-control"
 )
 
 func main() {
@@ -212,6 +205,10 @@ func main() {
 		log.Fatalf("Failed to connect to MQTT broker: %v", token.Error())
 	}
 
+	// Create MQTT client wrapper
+	mqttClient := NewMQTTClient(webrtcManager)
+	mqttClient.client = client
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -220,6 +217,14 @@ func main() {
 	<-sigChan
 
 	log.Println("Shutting down...")
+
+	// Publish disconnect-tractor message before shutting down
+	mqttClient.PublishDisconnectTractor()
+
+	// Give a moment for the message to be sent
+	time.Sleep(500 * time.Millisecond)
+
 	client.Disconnect(250)
+	webrtcManager.Close()
 	log.Println("Disconnected. Goodbye!")
 }
