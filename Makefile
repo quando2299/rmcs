@@ -1,14 +1,14 @@
-# Makefile for C++ RMCS example
+# Makefile for C++ RMCS streaming application
 
 CXX = g++
 CXXFLAGS = -std=c++11 -Wall
 LDFLAGS = -L. -lrmcs -Wl,-rpath,.
 
 # Target executable
-TARGET = rmcs_example
+TARGET = streaming
 
 # Source files
-SOURCES = example_usage.cpp
+SOURCES = main.cpp
 
 # Object files
 OBJECTS = $(SOURCES:.cpp=.o)
