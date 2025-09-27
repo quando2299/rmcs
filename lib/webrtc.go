@@ -46,13 +46,13 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	// Load default camera (camera 1)
 	defaultCamera := 1
 	cameraMap := map[int]string{
-		1: "h264/flir_id8_image_resized",
-		2: "h264/leopard_id1_image_resized",
-		3: "h264/leopard_id3_image_resized",
-		4: "h264/leopard_id4_image_resized",
-		5: "h264/leopard_id5_image_resized",
-		6: "h264/leopard_id6_image_resized",
-		7: "h264/leopard_id7_image_resized",
+		1: "h264/flir_id8_image_resized_30fps",
+		2: "h264/leopard_id1_image_resized_30fps",
+		3: "h264/leopard_id3_image_resized_30fps",
+		4: "h264/leopard_id4_image_resized_30fps",
+		5: "h264/leopard_id5_image_resized_30fps",
+		6: "h264/leopard_id6_image_resized_30fps",
+		7: "h264/leopard_id7_image_resized_30fps",
 	}
 
 	if defaultDir, ok := cameraMap[defaultCamera]; ok {
@@ -211,13 +211,13 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 
 	// Map camera numbers to directories
 	cameraMap := map[int]string{
-		1: "h264/flir_id8_image_resized",
-		2: "h264/leopard_id1_image_resized",
-		3: "h264/leopard_id3_image_resized",
-		4: "h264/leopard_id4_image_resized",
-		5: "h264/leopard_id5_image_resized",
-		6: "h264/leopard_id6_image_resized",
-		7: "h264/leopard_id7_image_resized",
+		1: "h264/flir_id8_image_resized_30fps",
+		2: "h264/leopard_id1_image_resized_30fps",
+		3: "h264/leopard_id3_image_resized_30fps",
+		4: "h264/leopard_id4_image_resized_30fps",
+		5: "h264/leopard_id5_image_resized_30fps",
+		6: "h264/leopard_id6_image_resized_30fps",
+		7: "h264/leopard_id7_image_resized_30fps",
 	}
 
 	directory, ok := cameraMap[cameraNumber]

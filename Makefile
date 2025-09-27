@@ -2,7 +2,7 @@
 
 CXX = g++
 CXXFLAGS = -std=c++11 -Wall
-LDFLAGS = -L. -lrmcs -Wl,-rpath,.
+LDFLAGS = -L. -lrmcs -Wl,-rpath,@loader_path
 
 # Target executable
 TARGET = streaming

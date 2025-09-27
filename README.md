@@ -6,7 +6,7 @@ A Go-based C-shared library for WebRTC video streaming with MQTT signaling.
 
 ```
 backend-rmcs/
-├── lib/                    # Go source files
+├── lib/                   # Go source files
 │   ├── main.go            # Standalone executable (when not building as library)
 │   ├── rmcs_export.go     # C-exported functions for library
 │   ├── webrtc.go          # WebRTC manager with multi-peer support
@@ -16,11 +16,11 @@ backend-rmcs/
 │   ├── constants.go       # Configuration constants
 │   ├── go.mod             # Go module definition
 │   └── go.sum             # Go dependencies
-├── build/                  # Build outputs
+├── build/                 # Build outputs
 │   ├── librmcs.so         # C-shared library
 │   └── librmcs.h          # C header file
 ├── build.sh               # Build script for library
-├── example_usage.cpp      # C++ example
+├── main.cpp               # C++ Main
 └── Makefile               # Makefile for C++ example
 ```
 
@@ -28,7 +28,7 @@ backend-rmcs/
 
 ### Build the C-shared library:
 ```bash
-./build.sh
+./build-lib.sh
 ```
 
 This creates:

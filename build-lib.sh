@@ -4,6 +4,10 @@
 
 echo "Building RMCS C-shared library..."
 
+# Delete old built files
+rm librmcs.*
+rm build/librmcs.*
+
 # Copy h264 folders for streaming
 mv ../bag_processor/h264/ .
 
@@ -11,7 +15,7 @@ mv ../bag_processor/h264/ .
 cd lib
 
 # Build the C-shared library
-go build -tags library -buildmode=c-shared -o ../build/librmcs.so .
+go build -buildvcs=false -tags library -buildmode=c-shared -o ../build/librmcs.so .
 
 # Check if build was successful
 if [ $? -eq 0 ]; then
