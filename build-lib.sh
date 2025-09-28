@@ -5,10 +5,14 @@
 echo "Building RMCS C-shared library..."
 
 # Delete old built files
-rm librmcs.*
-rm build/librmcs.*
+rm -f librmcs.* 2>/dev/null
+rm -f build/librmcs.* 2>/dev/null
 
 # Copy h264 folders for streaming
+if [ -d "./h264" ]; then
+    echo "Removing existing h264 directory..."
+    rm -rf ./h264
+fi
 mv ../bag_processor/h264/ .
 
 # Navigate to lib directory
