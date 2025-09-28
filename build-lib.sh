@@ -9,11 +9,13 @@ rm -f librmcs.* 2>/dev/null
 rm -f build/librmcs.* 2>/dev/null
 
 # Copy h264 folders for streaming
-if [ -d "./h264" ]; then
-    echo "Removing existing h264 directory..."
-    rm -rf ./h264
+if [ ! -d "./h264" ]; then
+    echo "Creating h264 directory..."
+    mkdir -p ./h264
 fi
-mv ../bag_processor/h264/ .
+
+echo "Copying h264 contents from bag_processor..."
+cp -r ../bag_processor/h264/* ./h264/ 2>/dev/null || echo "No h264 files to copy yet"
 
 # Navigate to lib directory
 cd lib
