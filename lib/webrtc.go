@@ -12,6 +12,8 @@ type WebRTCManager struct {
 	peerConnections map[string]*webrtc.PeerConnection
 	videoTrack      *webrtc.TrackLocalStaticSample
 	videoStreamer   *VideoStreamer
+	cameraCapture   *CameraCapture
+	useCameraMode   bool
 	mu              sync.Mutex
 }
 
@@ -40,34 +42,20 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		return nil, err
 	}
 
-	// Create proper video streamer based on libdatachannel C++ reference
-	videoStreamer := NewVideoStreamer(videoTrack)
+	// ALWAYS use camera mode for live streaming
+	useCameraMode := true
+	var cameraCapture *CameraCapture
 
-	// Load default camera (camera 1)
-	defaultCamera := 1
-	cameraMap := map[int]string{
-		1: "h264/flir_id8_image_resized_30fps",
-		2: "h264/leopard_id1_image_resized_30fps",
-		3: "h264/leopard_id3_image_resized_30fps",
-		4: "h264/leopard_id4_image_resized_30fps",
-		5: "h264/leopard_id5_image_resized_30fps",
-		6: "h264/leopard_id6_image_resized_30fps",
-		7: "h264/leopard_id7_image_resized_30fps",
-	}
-
-	if defaultDir, ok := cameraMap[defaultCamera]; ok {
-		if err := videoStreamer.LoadH264Files(defaultDir); err != nil {
-			log.Printf("ERROR: Failed to load default camera %d files: %v", defaultCamera, err)
-			// Don't continue if no files found
-		} else {
-			log.Printf("Loaded default camera %d: %s", defaultCamera, defaultDir)
-		}
-	}
+	// Create camera capture but DON'T start it yet (will start when client connects)
+	cameraCapture = NewCameraCapture(videoTrack, 0) // 0 = built-in camera
+	log.Println("Camera mode enabled - will start streaming live camera when client connects")
 
 	return &WebRTCManager{
 		peerConnections: make(map[string]*webrtc.PeerConnection),
 		videoTrack:      videoTrack,
-		videoStreamer:   videoStreamer,
+		videoStreamer:   nil, // No file-based streaming
+		cameraCapture:   cameraCapture,
+		useCameraMode:   useCameraMode,
 	}, nil
 }
 
@@ -113,7 +101,16 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			log.Printf("[%s] WebRTC connected, starting video stream", peerID)
-			w.videoStreamer.StartStreaming()
+			if w.useCameraMode && w.cameraCapture != nil {
+				// Start camera capture on first connection
+				if err := w.cameraCapture.Start(); err != nil {
+					log.Printf("ERROR: Failed to start camera: %v", err)
+				} else {
+					log.Println("Camera streaming started")
+				}
+			} else if w.videoStreamer != nil {
+				w.videoStreamer.StartStreaming()
+			}
 		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			log.Printf("[%s] WebRTC disconnected", peerID)
 			// Check if any peers are still connected
@@ -129,7 +126,11 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			if !hasConnected {
 				log.Println("No peers connected, stopping video stream")
-				w.videoStreamer.StopStreaming()
+				if w.useCameraMode && w.cameraCapture != nil {
+					w.cameraCapture.Stop()
+				} else if w.videoStreamer != nil {
+					w.videoStreamer.StopStreaming()
+				}
 			}
 		}
 	})
@@ -209,7 +210,13 @@ func (w *WebRTCManager) SetupICECandidateHandler(peerID string, handler func(*we
 func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 	log.Printf("SwitchCamera called with camera number: %d", cameraNumber)
 
-	// Map camera numbers to directories
+	// In camera mode, all cameras use the same live camera for now
+	if w.useCameraMode {
+		log.Printf("Camera mode: all camera IDs use live camera (switching not implemented yet)")
+		return nil
+	}
+
+	// File mode - switch between video files
 	cameraMap := map[int]string{
 		1: "h264/flir_id8_image_resized_30fps",
 		2: "h264/leopard_id1_image_resized_30fps",
@@ -256,7 +263,11 @@ func (w *WebRTCManager) DisconnectPeer(peerID string) error {
 
 		if !hasConnected {
 			log.Println("No peers connected after disconnect, stopping video stream")
-			w.videoStreamer.StopStreaming()
+			if w.useCameraMode && w.cameraCapture != nil {
+				w.cameraCapture.Stop()
+			} else if w.videoStreamer != nil {
+				w.videoStreamer.StopStreaming()
+			}
 		}
 
 		return err
@@ -276,6 +287,12 @@ func (w *WebRTCManager) Close() error {
 	}
 
 	w.peerConnections = make(map[string]*webrtc.PeerConnection)
-	w.videoStreamer.StopStreaming()
+
+	if w.useCameraMode && w.cameraCapture != nil {
+		w.cameraCapture.Stop()
+	} else if w.videoStreamer != nil {
+		w.videoStreamer.StopStreaming()
+	}
+
 	return nil
 }
