@@ -1,0 +1,37 @@
+FROM golang:1.23-bookworm
+
+# Install FFmpeg and build tools
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    build-essential \
+    g++ \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Copy the entire project
+COPY . .
+
+# Build the Go library
+WORKDIR /app/lib
+RUN go mod download
+
+# Build Go shared library (generates both .so and .h files)
+RUN go build -buildvcs=false -tags library -buildmode=c-shared -o ../librmcs.so .
+
+# Copy to build directory for compatibility
+RUN mkdir -p ../build
+RUN cp ../librmcs.so ../build/
+RUN cp ../librmcs.h ../build/
+
+# Build C++ application
+WORKDIR /app
+RUN make clean && make
+
+# Set library path
+ENV LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
+
+# Run the streaming application
+CMD ["./streaming"]

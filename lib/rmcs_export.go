@@ -93,16 +93,33 @@ func RMCSStop() C.int {
 
 	log.Println("Stopping RMCS...")
 
-	if rmcsInstance.client != nil {
-		// Publish disconnect-tractor before stopping
-		rmcsInstance.client.PublishDisconnectTractor()
-		// Give time for message to send
-		time.Sleep(500 * time.Millisecond)
-		rmcsInstance.client.Disconnect()
-	}
+	// Use a channel to implement timeout for cleanup
+	done := make(chan bool, 1)
 
-	if rmcsInstance.webrtcManager != nil {
-		rmcsInstance.webrtcManager.Close()
+	go func() {
+		if rmcsInstance.webrtcManager != nil {
+			log.Println("Closing WebRTC manager...")
+			rmcsInstance.webrtcManager.Close()
+		}
+
+		if rmcsInstance.client != nil {
+			log.Println("Publishing disconnect and stopping MQTT...")
+			// Publish disconnect-tractor before stopping
+			rmcsInstance.client.PublishDisconnectTractor()
+			// Give time for message to send
+			time.Sleep(500 * time.Millisecond)
+			rmcsInstance.client.Disconnect()
+		}
+
+		done <- true
+	}()
+
+	// Wait for cleanup with 3 second timeout
+	select {
+	case <-done:
+		log.Println("Clean shutdown completed")
+	case <-time.After(3 * time.Second):
+		log.Println("Shutdown timeout - forcing exit")
 	}
 
 	rmcsInstance.running = false

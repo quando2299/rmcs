@@ -13,7 +13,10 @@ type WebRTCManager struct {
 	videoTrack      *webrtc.TrackLocalStaticSample
 	videoStreamer   *VideoStreamer
 	cameraCapture   *CameraCapture
+	rosSubscriber   *ROSSubscriber
+	useROSMode      bool
 	useCameraMode   bool
+	rosMasterURI    string
 	mu              sync.Mutex
 }
 
@@ -42,20 +45,24 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		return nil, err
 	}
 
-	// ALWAYS use camera mode for live streaming
-	useCameraMode := true
-	var cameraCapture *CameraCapture
+	// Use ROS mode for streaming from ROS topics
+	useROSMode := true
+	rosMasterURI := "ros-master:11311" // ROS Master URI (use ros-master when running in Docker, localhost when on host)
+	var rosSubscriber *ROSSubscriber
 
-	// Create camera capture but DON'T start it yet (will start when client connects)
-	cameraCapture = NewCameraCapture(videoTrack, 0) // 0 = built-in camera
-	log.Println("Camera mode enabled - will start streaming live camera when client connects")
+	// Create ROS subscriber but DON'T start it yet (will start when client connects)
+	rosSubscriber = NewROSSubscriber(videoTrack, 1, rosMasterURI) // Start with camera 1
+	log.Println("ROS mode enabled - will subscribe to topics when client connects")
 
 	return &WebRTCManager{
 		peerConnections: make(map[string]*webrtc.PeerConnection),
 		videoTrack:      videoTrack,
 		videoStreamer:   nil, // No file-based streaming
-		cameraCapture:   cameraCapture,
-		useCameraMode:   useCameraMode,
+		cameraCapture:   nil, // No direct camera capture
+		rosSubscriber:   rosSubscriber,
+		useROSMode:      useROSMode,
+		useCameraMode:   false,
+		rosMasterURI:    rosMasterURI,
 	}, nil
 }
 
@@ -101,7 +108,14 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			log.Printf("[%s] WebRTC connected, starting video stream", peerID)
-			if w.useCameraMode && w.cameraCapture != nil {
+			if w.useROSMode && w.rosSubscriber != nil {
+				// Start ROS subscriber on first connection
+				if err := w.rosSubscriber.Start(); err != nil {
+					log.Printf("ERROR: Failed to start ROS subscriber: %v", err)
+				} else {
+					log.Println("ROS subscriber started")
+				}
+			} else if w.useCameraMode && w.cameraCapture != nil {
 				// Start camera capture on first connection
 				if err := w.cameraCapture.Start(); err != nil {
 					log.Printf("ERROR: Failed to start camera: %v", err)
@@ -126,7 +140,9 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			if !hasConnected {
 				log.Println("No peers connected, stopping video stream")
-				if w.useCameraMode && w.cameraCapture != nil {
+				if w.useROSMode && w.rosSubscriber != nil {
+					w.rosSubscriber.Stop()
+				} else if w.useCameraMode && w.cameraCapture != nil {
 					w.cameraCapture.Stop()
 				} else if w.videoStreamer != nil {
 					w.videoStreamer.StopStreaming()
@@ -210,6 +226,42 @@ func (w *WebRTCManager) SetupICECandidateHandler(peerID string, handler func(*we
 func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 	log.Printf("SwitchCamera called with camera number: %d", cameraNumber)
 
+	// ROS mode - switch between ROS topics
+	if w.useROSMode && w.rosSubscriber != nil {
+		if cameraNumber < 1 || cameraNumber > 8 {
+			return fmt.Errorf("invalid camera number: %d (must be 1-8)", cameraNumber)
+		}
+
+		log.Printf("ROS mode: stopping current subscriber")
+		w.rosSubscriber.Stop()
+
+		// Create new subscriber with different topic
+		w.rosSubscriber = NewROSSubscriber(w.videoTrack, cameraNumber, w.rosMasterURI)
+
+		// Check if any peers are connected, if so start the new subscriber
+		w.mu.Lock()
+		hasConnected := false
+		for _, pc := range w.peerConnections {
+			if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+				hasConnected = true
+				break
+			}
+		}
+		w.mu.Unlock()
+
+		if hasConnected {
+			log.Printf("ROS mode: starting subscriber for camera %d", cameraNumber)
+			if err := w.rosSubscriber.Start(); err != nil {
+				return fmt.Errorf("failed to start ROS subscriber for camera %d: %v", cameraNumber, err)
+			}
+			log.Printf("Successfully switched to camera %d (%s)", cameraNumber, getTopicName(cameraNumber))
+		} else {
+			log.Printf("No connected peers, will start subscriber when client connects")
+		}
+
+		return nil
+	}
+
 	// In camera mode, all cameras use the same live camera for now
 	if w.useCameraMode {
 		log.Printf("Camera mode: all camera IDs use live camera (switching not implemented yet)")
@@ -263,7 +315,9 @@ func (w *WebRTCManager) DisconnectPeer(peerID string) error {
 
 		if !hasConnected {
 			log.Println("No peers connected after disconnect, stopping video stream")
-			if w.useCameraMode && w.cameraCapture != nil {
+			if w.useROSMode && w.rosSubscriber != nil {
+				w.rosSubscriber.Stop()
+			} else if w.useCameraMode && w.cameraCapture != nil {
 				w.cameraCapture.Stop()
 			} else if w.videoStreamer != nil {
 				w.videoStreamer.StopStreaming()
@@ -288,7 +342,9 @@ func (w *WebRTCManager) Close() error {
 
 	w.peerConnections = make(map[string]*webrtc.PeerConnection)
 
-	if w.useCameraMode && w.cameraCapture != nil {
+	if w.useROSMode && w.rosSubscriber != nil {
+		w.rosSubscriber.Stop()
+	} else if w.useCameraMode && w.cameraCapture != nil {
 		w.cameraCapture.Stop()
 	} else if w.videoStreamer != nil {
 		w.videoStreamer.StopStreaming()

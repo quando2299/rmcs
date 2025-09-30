@@ -1,10 +1,27 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
+#include <csignal>
+#include <atomic>
 #include "librmcs.h"
+
+std::atomic<bool> running(true);
+
+void signalHandler(int signum) {
+    std::cout << "\nReceived signal " << signum << ". Shutting down..." << std::endl;
+    running = false;
+
+    // Restore default signal handler to allow force quit on second Ctrl+C
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+}
 
 int main() {
     std::cout << "=== RMCS C++ Example ===" << std::endl;
+
+    // Setup signal handlers for graceful shutdown
+    signal(SIGINT, signalHandler);   // Ctrl+C
+    signal(SIGTERM, signalHandler);  // Docker stop
 
     // Optional: Set log file
     // RMCSSetLogFile("rmcs_log.txt");
@@ -23,9 +40,11 @@ int main() {
     int status = RMCSGetStatus();
     std::cout << "RMCS Status: " << (status == 1 ? "Running" : "Not Running") << std::endl;
 
-    // Keep running (in real application, you'd have your main loop here)
-    std::cout << "\nRMCS is running. Press Enter to stop..." << std::endl;
-    std::cin.get();
+    // Keep running until signal received
+    std::cout << "\nRMCS is running. Press Ctrl+C to stop..." << std::endl;
+    while (running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     // Stop RMCS
     std::cout << "Stopping RMCS..." << std::endl;
