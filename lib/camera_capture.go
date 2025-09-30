@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"io"
 	"log"
 	"os/exec"
@@ -174,12 +175,12 @@ func (c *CameraCapture) readH264Stream(reader io.Reader) {
 					c.mu.Unlock()
 					log.Printf("Cached PPS (%d bytes)", len(nalUnit))
 
-					// Send initial config when we have both SPS and PPS
+					// Send initial config when we have both SPS and PPS (no SEI for config)
 					if waitingForConfig && c.sps != nil && c.pps != nil {
 						waitingForConfig = false
 						log.Println("Sending initial SPS+PPS")
-						c.sendNALUnit(c.sps)
-						c.sendNALUnit(c.pps)
+						c.sendNALUnitNoSEI(c.sps)
+						c.sendNALUnitNoSEI(c.pps)
 					}
 
 				case 5: // IDR
@@ -194,20 +195,24 @@ func (c *CameraCapture) readH264Stream(reader io.Reader) {
 					continue
 				}
 
-				// For IDR frames, prepend SPS+PPS
+				// For IDR frames, prepend SPS+PPS (without SEI)
 				if nalType == 5 {
 					c.mu.Lock()
 					if c.sps != nil {
-						c.sendNALUnit(c.sps)
+						c.sendNALUnitNoSEI(c.sps)
 					}
 					if c.pps != nil {
-						c.sendNALUnit(c.pps)
+						c.sendNALUnitNoSEI(c.pps)
 					}
 					c.mu.Unlock()
 				}
 
-				// Send the frame
-				c.sendNALUnit(nalUnit)
+				// Send the frame WITH SEI only for video slices (types 1, 5)
+				if nalType == 1 || nalType == 5 {
+					c.sendNALUnitWithSEI(nalUnit)
+				} else {
+					c.sendNALUnitNoSEI(nalUnit)
+				}
 
 				framesSent++
 				if framesSent%90 == 0 {
@@ -273,10 +278,39 @@ func (c *CameraCapture) extractNextNALUnit(buffer []byte) (nalUnit []byte, remai
 	return nalUnit, remaining, true
 }
 
-func (c *CameraCapture) sendNALUnit(nalUnit []byte) {
-	// Add Annex B start code
+func (c *CameraCapture) sendNALUnitWithSEI(nalUnit []byte) {
 	startCode := []byte{0x00, 0x00, 0x00, 0x01}
-	data := append(startCode, nalUnit...)
+
+	// Get current timestamp in microseconds
+	timestampUs := uint64(time.Now().UnixNano() / 1000)
+
+	// Create SEI with timestamp
+	seiNAL := createSimpleTimestampSEI(timestampUs)
+
+	// Build frame: SEI + NAL unit
+	var data []byte
+	data = append(data, startCode...)
+	data = append(data, seiNAL...)
+	data = append(data, startCode...)
+	data = append(data, nalUnit...)
+
+	err := c.track.WriteSample(media.Sample{
+		Data:     data,
+		Duration: time.Duration(c.sampleDurationUs) * time.Microsecond,
+	})
+
+	if err != nil && err != io.ErrClosedPipe {
+		log.Printf("Error writing sample: %v", err)
+	}
+}
+
+func (c *CameraCapture) sendNALUnitNoSEI(nalUnit []byte) {
+	startCode := []byte{0x00, 0x00, 0x00, 0x01}
+
+	// Build frame: just NAL unit without SEI
+	var data []byte
+	data = append(data, startCode...)
+	data = append(data, nalUnit...)
 
 	err := c.track.WriteSample(media.Sample{
 		Data:     data,
@@ -309,4 +343,53 @@ func (c *CameraCapture) GetInitialNALUnits() []byte {
 	}
 
 	return result
+}
+
+// addEmulationPrevention adds 0x03 bytes after 0x00 0x00 sequences
+func addEmulationPrevention(data []byte) []byte {
+	var result []byte
+	zeroCount := 0
+
+	for _, b := range data {
+		if zeroCount == 2 && b <= 0x03 {
+			// Insert emulation prevention byte
+			result = append(result, 0x03)
+			zeroCount = 0
+		}
+
+		result = append(result, b)
+
+		if b == 0x00 {
+			zeroCount++
+		} else {
+			zeroCount = 0
+		}
+	}
+
+	return result
+}
+
+// createSimpleTimestampSEI creates a Flutter-compatible SEI NAL unit with timestamp
+// Matches the format expected by extractSeiPayload() in Flutter
+func createSimpleTimestampSEI(timestampUs uint64) []byte {
+	// Timestamp payload: just 8 bytes big-endian
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, timestampUs)
+
+	// Build raw SEI payload (before RBSP encoding)
+	var rawPayload []byte
+	rawPayload = append(rawPayload, 0x05) // Payload type (User Data Unregistered)
+	rawPayload = append(rawPayload, 0x08) // Payload size (8 bytes)
+	rawPayload = append(rawPayload, timestampBytes...) // 8-byte timestamp
+
+	// Add emulation prevention bytes
+	rbspPayload := addEmulationPrevention(rawPayload)
+
+	// Build final SEI NAL unit
+	var sei []byte
+	sei = append(sei, 0x06) // SEI NAL type
+	sei = append(sei, rbspPayload...) // RBSP-encoded payload
+	sei = append(sei, 0x80) // RBSP stop bit
+
+	return sei
 }
