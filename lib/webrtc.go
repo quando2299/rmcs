@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -47,7 +49,17 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 
 	// Use ROS mode for streaming from ROS topics
 	useROSMode := true
-	rosMasterURI := "ros-master:11311" // ROS Master URI (use ros-master when running in Docker, localhost when on host)
+
+	// Get ROS Master URI from environment variable, default to Docker network
+	rosMasterURI := os.Getenv("ROS_MASTER_URI")
+	if rosMasterURI == "" {
+		rosMasterURI = "ros-master:11311" // Default for Docker network
+	} else {
+		// Remove http:// prefix if present (goroslib doesn't need it)
+		rosMasterURI = strings.TrimPrefix(rosMasterURI, "http://")
+	}
+	log.Printf("Using ROS Master URI: %s", rosMasterURI)
+
 	var rosSubscriber *ROSSubscriber
 
 	// Create ROS subscriber but DON'T start it yet (will start when client connects)
