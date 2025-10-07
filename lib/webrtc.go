@@ -19,6 +19,7 @@ type WebRTCManager struct {
 	useROSMode      bool
 	useCameraMode   bool
 	rosMasterURI    string
+	customTopics    map[int]string // Map camera number (1-7) to custom topic names
 	mu              sync.Mutex
 }
 
@@ -62,9 +63,29 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 
 	var rosSubscriber *ROSSubscriber
 
-	// Create ROS subscriber but DON'T start it yet (will start when client connects)
-	rosSubscriber = NewROSSubscriber(videoTrack, 1, rosMasterURI) // Start with camera 1
-	log.Println("ROS mode enabled - will subscribe to topics when client connects")
+	// Load custom topics from environment variables (ROS_TOPIC_1 through ROS_TOPIC_7)
+	customTopics := make(map[int]string)
+	for i := 1; i <= 7; i++ {
+		envVar := fmt.Sprintf("ROS_TOPIC_%d", i)
+		if topic := os.Getenv(envVar); topic != "" {
+			customTopics[i] = topic
+			log.Printf("Loaded custom topic for camera %d: %s", i, topic)
+		}
+	}
+
+	// Start with camera 1
+	cameraIndex := 1
+
+	// Create ROS subscriber
+	rosSubscriber = NewROSSubscriber(videoTrack, cameraIndex, rosMasterURI)
+
+	// Override topic name if custom topic is specified for camera 1
+	if customTopic, exists := customTopics[1]; exists {
+		rosSubscriber.topicName = customTopic
+		log.Printf("ROS mode enabled - will subscribe to custom topic: %s", customTopic)
+	} else {
+		log.Printf("ROS mode enabled - will subscribe to topic for camera %d: %s", cameraIndex, rosSubscriber.topicName)
+	}
 
 	return &WebRTCManager{
 		peerConnections: make(map[string]*webrtc.PeerConnection),
@@ -75,6 +96,7 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		useROSMode:      useROSMode,
 		useCameraMode:   false,
 		rosMasterURI:    rosMasterURI,
+		customTopics:    customTopics,
 	}, nil
 }
 
@@ -250,6 +272,14 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 		// Create new subscriber with different topic
 		w.rosSubscriber = NewROSSubscriber(w.videoTrack, cameraNumber, w.rosMasterURI)
 
+		// Check if custom topic is defined for this camera number
+		if customTopic, exists := w.customTopics[cameraNumber]; exists {
+			w.rosSubscriber.topicName = customTopic
+			log.Printf("Using custom topic for camera %d: %s", cameraNumber, customTopic)
+		} else {
+			log.Printf("Using default topic for camera %d: %s", cameraNumber, w.rosSubscriber.topicName)
+		}
+
 		// Check if any peers are connected, if so start the new subscriber
 		w.mu.Lock()
 		hasConnected := false
@@ -266,7 +296,7 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 			if err := w.rosSubscriber.Start(); err != nil {
 				return fmt.Errorf("failed to start ROS subscriber for camera %d: %v", cameraNumber, err)
 			}
-			log.Printf("Successfully switched to camera %d (%s)", cameraNumber, getTopicName(cameraNumber))
+			log.Printf("Successfully switched to camera %d", cameraNumber)
 		} else {
 			log.Printf("No connected peers, will start subscriber when client connects")
 		}

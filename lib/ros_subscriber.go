@@ -49,6 +49,10 @@ type ROSSubscriber struct {
 	// First frame flag to detect dimensions
 	firstFrameReceived   bool
 	dimensionInitialized bool
+
+	// Timeout detection
+	lastMessageTime time.Time
+	timeoutDuration time.Duration
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
@@ -69,7 +73,42 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 		height:               0,
 		firstFrameReceived:   false,
 		dimensionInitialized: false,
+		timeoutDuration:      10 * time.Second, // 10 second timeout for no messages
+		lastMessageTime:      time.Now(),
 	}
+}
+
+// CheckTopicExists verifies if a ROS topic is available
+func CheckROSTopicExists(topicName string, rosMasterURI string) error {
+	// Create temporary ROS node to check topic availability
+	node, err := goroslib.NewNode(goroslib.NodeConf{
+		Name:          "rmcs_topic_checker",
+		MasterAddress: rosMasterURI,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to connect to ROS master: %v", err)
+	}
+	defer node.Close()
+
+	// Try to create a subscriber to verify topic exists
+	// We don't need to actually receive messages, just verify it can subscribe
+	sub, err := goroslib.NewSubscriber(goroslib.SubscriberConf{
+		Node:  node,
+		Topic: topicName,
+		Callback: func(msg *sensor_msgs.Image) {
+			// Empty callback - we just want to verify subscription works
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("topic '%s' not available: %v", topicName, err)
+	}
+	defer sub.Close()
+
+	// Give it a brief moment to establish subscription
+	time.Sleep(100 * time.Millisecond)
+
+	log.Printf("ROS topic '%s' is available", topicName)
+	return nil
 }
 
 func getTopicName(cameraIndex int) string {
@@ -128,8 +167,42 @@ func (r *ROSSubscriber) Start() error {
 	r.sub = sub
 
 	r.isRunning = true
+	r.lastMessageTime = time.Now()
+
+	// Start timeout monitor goroutine
+	go r.monitorTimeout()
+
 	log.Printf("ROS subscriber started on topic: %s (waiting for first frame to detect dimensions)", r.topicName)
 	return nil
+}
+
+// monitorTimeout checks if ROS messages have stopped arriving
+func (r *ROSSubscriber) monitorTimeout() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.stopChan:
+			return
+		case <-ticker.C:
+			r.mu.Lock()
+			isRunning := r.isRunning
+			lastTime := r.lastMessageTime
+			timeout := r.timeoutDuration
+			r.mu.Unlock()
+
+			if !isRunning {
+				return
+			}
+
+			timeSinceLastMsg := time.Since(lastTime)
+			if timeSinceLastMsg > timeout {
+				log.Printf("ROS_TIMEOUT_WARNING: No messages received on topic '%s' for %.1f seconds (last message: %v)",
+					r.topicName, timeSinceLastMsg.Seconds(), lastTime.Format("15:04:05"))
+			}
+		}
+	}
 }
 
 func (r *ROSSubscriber) initFFmpeg() error {
@@ -266,6 +339,9 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		r.mu.Unlock()
 		return
 	}
+
+	// Update last message time for timeout monitoring
+	r.lastMessageTime = time.Now()
 
 	// Verify encoding is bgr8
 	if msg.Encoding != "bgr8" {

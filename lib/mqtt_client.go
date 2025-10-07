@@ -50,7 +50,7 @@ func (m *MQTTClient) Connect() error {
 			var cameraNumber int
 			_, err := fmt.Sscanf(string(msg.Payload()), "%d", &cameraNumber)
 			if err != nil {
-				log.Printf("Failed to parse camera number from message: %v", err)
+				log.Printf("MQTT_ERROR: Failed to parse camera number from message '%s': %v", string(msg.Payload()), err)
 				return
 			}
 
@@ -58,7 +58,11 @@ func (m *MQTTClient) Connect() error {
 
 			// Switch to requested camera
 			if err := m.webrtcManager.SwitchCamera(cameraNumber); err != nil {
-				log.Printf("Failed to switch camera: %v", err)
+				log.Printf("MQTT_ERROR: Camera switch failed for camera %d: %v", cameraNumber, err)
+				// Publish error status back to MQTT if needed
+				errorTopic := fmt.Sprintf("%s/camera/error", thingName)
+				errorMsg := fmt.Sprintf("Failed to switch to camera %d: %v", cameraNumber, err)
+				client.Publish(errorTopic, 0, false, errorMsg)
 			} else {
 				log.Printf("Successfully switched to camera %d", cameraNumber)
 			}
