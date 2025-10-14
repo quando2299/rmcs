@@ -41,3 +41,5 @@ else
     echo "Build failed!"
     exit 1
 fi
+
+make clean && make

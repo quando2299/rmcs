@@ -213,6 +213,8 @@ func (r *ROSSubscriber) initFFmpeg() error {
 	log.Printf("Starting FFmpeg with dimensions: %dx%d", r.width, r.height)
 
 	args := []string{
+		"-hide_banner",
+		"-loglevel", "error",
 		"-f", "rawvideo",
 		"-pixel_format", "bgr24", // ROS bgr8 = 3 bytes per pixel (8 bits per channel)
 		"-video_size", fmt.Sprintf("%dx%d", r.width, r.height),
@@ -391,10 +393,6 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 
 	// Add logging to verify messages are being received
 	r.messageCount++
-	if r.messageCount%30 == 1 {
-		log.Printf("Received ROS image message %d: %dx%d, encoding=%s, data_len=%d",
-			r.messageCount, msg.Width, msg.Height, msg.Encoding, len(msg.Data))
-	}
 
 	// Validate data size matches expected dimensions
 	expectedSize := int(r.width * r.height * 3) // BGR8 = 3 bytes per pixel
@@ -427,9 +425,6 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 			log.Printf("ERROR: Incomplete write to FFmpeg. Expected %d bytes, wrote %d bytes", len(msg.Data), n)
 			return
 		}
-		if r.messageCount <= 3 {
-			log.Printf("Wrote %d bytes to FFmpeg stdin (frame %d)", n, r.messageCount)
-		}
 	}
 }
 
@@ -442,7 +437,7 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 	for {
 		select {
 		case <-r.stopChan:
-			log.Printf("Stopping ROS stream. Sent %d frames", framesSent)
+			log.Printf("Stopping ROS stream.")
 			return
 		default:
 			// Read data from FFmpeg stdout
@@ -482,19 +477,16 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 					r.sps = make([]byte, len(nalUnit))
 					copy(r.sps, nalUnit)
 					r.mu.Unlock()
-					log.Printf("ROS: Cached SPS (%d bytes)", len(nalUnit))
 
 				case 8: // PPS
 					r.mu.Lock()
 					r.pps = make([]byte, len(nalUnit))
 					copy(r.pps, nalUnit)
 					r.mu.Unlock()
-					log.Printf("ROS: Cached PPS (%d bytes)", len(nalUnit))
 
 					// Send initial config when we have both SPS and PPS
 					if waitingForConfig && r.sps != nil && r.pps != nil {
 						waitingForConfig = false
-						log.Println("ROS: Sending initial SPS+PPS")
 						r.sendNALUnitNoSEI(r.sps)
 						r.sendNALUnitNoSEI(r.pps)
 					}
@@ -504,9 +496,6 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 					r.lastIDR = make([]byte, len(nalUnit))
 					copy(r.lastIDR, nalUnit)
 					r.mu.Unlock()
-					if framesSent <= 3 {
-						log.Printf("ROS: Cached IDR frame (%d bytes)", len(nalUnit))
-					}
 				}
 
 				// Skip frames until we have configuration
@@ -534,9 +523,6 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 				}
 
 				framesSent++
-				if framesSent%90 == 0 {
-					log.Printf("Sent %d frames from ROS topic %s", framesSent, r.topicName)
-				}
 			}
 		}
 	}
