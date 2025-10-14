@@ -26,9 +26,9 @@ type ROSSubscriber struct {
 	topicName    string
 	rosMasterURI string
 
-	// FFmpeg stdin pipe for writing BGR images
-	ffmpegStdin  io.WriteCloser
-	ffmpegStdout io.ReadCloser
+	// GStreamer stdin pipe for writing BGR images
+	gstStdin  io.WriteCloser
+	gstStdout io.ReadCloser
 
 	// Cached NAL units
 	sps     []byte
@@ -205,88 +205,87 @@ func (r *ROSSubscriber) monitorTimeout() {
 	}
 }
 
-func (r *ROSSubscriber) initFFmpeg() error {
+func (r *ROSSubscriber) initGStreamer() error {
 	if r.width == 0 || r.height == 0 {
-		return fmt.Errorf("cannot start FFmpeg with zero dimensions")
+		return fmt.Errorf("cannot start GStreamer with zero dimensions")
 	}
 
-	log.Printf("Starting FFmpeg with dimensions: %dx%d", r.width, r.height)
+	log.Printf("Starting GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
+
+	// GStreamer pipeline using NVIDIA hardware encoder
+	pipeline := fmt.Sprintf(
+		"fdsrc fd=0 ! "+
+			"rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
+			"videoconvert ! "+
+			"nvvidconv ! "+
+			"video/x-raw(memory:NVMM),format=NV12 ! "+
+			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
+			"h264parse ! "+
+			"fdsink fd=1",
+		r.width, r.height, r.fps, r.fps*2, // iframeinterval = keyframe every 2 seconds
+	)
 
 	args := []string{
-		"-hide_banner",
-		"-loglevel", "error",
-		"-f", "rawvideo",
-		"-pixel_format", "bgr24", // ROS bgr8 = 3 bytes per pixel (8 bits per channel)
-		"-video_size", fmt.Sprintf("%dx%d", r.width, r.height),
-		"-framerate", fmt.Sprintf("%d", r.fps),
-		"-i", "pipe:0", // Read from stdin
-		"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", // Ensure even dimensions
-		"-c:v", "libx264", // H264 codec
-		"-preset", "veryfast", // Faster encoding for better framerate
-		"-crf", "28", // Lower quality for faster encoding
-		"-g", "60", // Keyframe every 2 seconds
-		"-bf", "0", // No B-frames for lower latency
-		"-refs", "1", // Single reference frame for speed
-		"-threads", "0", // Auto-detect thread count
-		"-pix_fmt", "yuv420p",
-		"-r", fmt.Sprintf("%d", r.fps), // Output framerate
-		"-bsf:v", "h264_mp4toannexb", // Convert to Annex B format
-		"-f", "h264", // Raw H264 output
-		"-",
+		"-q", // Quiet mode (reduce logs)
+		pipeline,
 	}
 
-	r.cmd = exec.Command("ffmpeg", args...)
+	r.cmd = exec.Command("gst-launch-1.0", args...)
 
 	// Get stdin pipe for writing raw BGR frames
-	ffmpegStdin, err := r.cmd.StdinPipe()
+	gstStdin, err := r.cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("failed to get FFmpeg stdin: %v", err)
+		return fmt.Errorf("failed to get GStreamer stdin: %v", err)
 	}
-	r.ffmpegStdin = ffmpegStdin
+	r.gstStdin = gstStdin
 
 	// Get stdout pipe for reading H.264 stream
 	stdout, err := r.cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to get FFmpeg stdout: %v", err)
+		return fmt.Errorf("failed to get GStreamer stdout: %v", err)
 	}
-	r.ffmpegStdout = stdout
+	r.gstStdout = stdout
 
 	// Get stderr pipe for logging
 	stderr, err := r.cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("failed to get FFmpeg stderr: %v", err)
+		return fmt.Errorf("failed to get GStreamer stderr: %v", err)
 	}
 
-	// Start FFmpeg
+	// Start GStreamer
 	if err := r.cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start FFmpeg: %v", err)
+		return fmt.Errorf("failed to start GStreamer: %v", err)
 	}
 
-	// Log FFmpeg stderr in background
+	// Log GStreamer stderr in background
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			log.Printf("[FFmpeg ROS] %s", scanner.Text())
+			line := scanner.Text()
+			// Only log errors and warnings
+			if len(line) > 0 && (line[0] == 'E' || line[0] == 'W') {
+				log.Printf("[GStreamer ROS] %s", line)
+			}
 		}
 	}()
 
-	// Start reading H.264 stream from FFmpeg
+	// Start reading H.264 stream from GStreamer
 	go r.readH264Stream(stdout)
 
 	r.dimensionInitialized = true
-	log.Printf("FFmpeg started successfully for %dx%d @ %d fps", r.width, r.height, r.fps)
+	log.Printf("GStreamer NVIDIA hardware encoder started successfully for %dx%d @ %d fps", r.width, r.height, r.fps)
 	return nil
 }
 
-func (r *ROSSubscriber) stopFFmpeg() {
-	if r.ffmpegStdin != nil {
-		r.ffmpegStdin.Close()
-		r.ffmpegStdin = nil
+func (r *ROSSubscriber) stopGStreamer() {
+	if r.gstStdin != nil {
+		r.gstStdin.Close()
+		r.gstStdin = nil
 	}
 
-	if r.ffmpegStdout != nil {
-		r.ffmpegStdout.Close()
-		r.ffmpegStdout = nil
+	if r.gstStdout != nil {
+		r.gstStdout.Close()
+		r.gstStdout = nil
 	}
 
 	if r.cmd != nil && r.cmd.Process != nil {
@@ -300,7 +299,7 @@ func (r *ROSSubscriber) stopFFmpeg() {
 	r.pps = nil
 	r.lastIDR = nil
 
-	log.Println("FFmpeg stopped")
+	log.Println("GStreamer stopped")
 }
 
 func (r *ROSSubscriber) Stop() {
@@ -322,7 +321,7 @@ func (r *ROSSubscriber) Stop() {
 		r.sub = nil
 	}
 
-	r.stopFFmpeg()
+	r.stopGStreamer()
 
 	if r.node != nil {
 		r.node.Close()
@@ -354,37 +353,37 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		return
 	}
 
-	// First frame: detect dimensions and start FFmpeg
+	// First frame: detect dimensions and start GStreamer
 	if !r.firstFrameReceived {
 		r.firstFrameReceived = true
 		r.width = msg.Width
 		r.height = msg.Height
 		log.Printf("Detected image dimensions from first frame: %dx%d", r.width, r.height)
 
-		// Start FFmpeg with detected dimensions
-		if err := r.initFFmpeg(); err != nil {
+		// Start GStreamer with detected dimensions
+		if err := r.initGStreamer(); err != nil {
 			r.mu.Unlock()
-			log.Printf("ERROR: Failed to start FFmpeg: %v", err)
+			log.Printf("ERROR: Failed to start GStreamer: %v", err)
 			return
 		}
 	}
 
-	// Handle dimension changes (restart FFmpeg)
+	// Handle dimension changes (restart GStreamer)
 	if msg.Width != r.width || msg.Height != r.height {
-		log.Printf("Image dimensions changed: %dx%d -> %dx%d. Restarting FFmpeg...",
+		log.Printf("Image dimensions changed: %dx%d -> %dx%d. Restarting GStreamer...",
 			r.width, r.height, msg.Width, msg.Height)
 
-		// Stop old FFmpeg
-		r.stopFFmpeg()
+		// Stop old GStreamer
+		r.stopGStreamer()
 
 		// Update dimensions
 		r.width = msg.Width
 		r.height = msg.Height
 
-		// Restart FFmpeg with new dimensions
-		if err := r.initFFmpeg(); err != nil {
+		// Restart GStreamer with new dimensions
+		if err := r.initGStreamer(); err != nil {
 			r.mu.Unlock()
-			log.Printf("ERROR: Failed to restart FFmpeg: %v", err)
+			log.Printf("ERROR: Failed to restart GStreamer: %v", err)
 			return
 		}
 	}
@@ -404,25 +403,25 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		return
 	}
 
-	// Write raw BGR data to FFmpeg stdin
+	// Write raw BGR data to GStreamer stdin
 	r.mu.Lock()
-	ffmpegStdin := r.ffmpegStdin
+	gstStdin := r.gstStdin
 	r.mu.Unlock()
 
-	if ffmpegStdin != nil {
-		n, err := ffmpegStdin.Write(msg.Data)
+	if gstStdin != nil {
+		n, err := gstStdin.Write(msg.Data)
 		if err != nil {
 			// Only log if still running (avoid spam during shutdown)
 			r.mu.Lock()
 			stillRunning := r.isRunning
 			r.mu.Unlock()
 			if stillRunning {
-				log.Printf("ERROR: Failed writing to FFmpeg stdin: %v", err)
+				log.Printf("ERROR: Failed writing to GStreamer stdin: %v", err)
 			}
 			return
 		}
 		if n != len(msg.Data) {
-			log.Printf("ERROR: Incomplete write to FFmpeg. Expected %d bytes, wrote %d bytes", len(msg.Data), n)
+			log.Printf("ERROR: Incomplete write to GStreamer. Expected %d bytes, wrote %d bytes", len(msg.Data), n)
 			return
 		}
 	}
