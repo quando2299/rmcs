@@ -28,6 +28,22 @@ TOPIC7="$8"
 echo "Starting RMCS on Jetson..."
 echo "Connecting to ROS Master at: $ROS_MASTER_IP:11311"
 echo ""
+
+# Get Jetson's local IP address (needed for ROS networking)
+if [ "$ROS_MASTER_IP" == "localhost" ] || [ "$ROS_MASTER_IP" == "127.0.0.1" ]; then
+    # Local ROS Master - use localhost
+    JETSON_IP="127.0.0.1"
+else
+    # Remote ROS Master - detect Jetson's IP on same network
+    JETSON_IP=$(ip route get $ROS_MASTER_IP | awk '{print $7; exit}')
+    if [ -z "$JETSON_IP" ]; then
+        # Fallback: get first non-loopback IP
+        JETSON_IP=$(hostname -I | awk '{print $1}')
+    fi
+fi
+
+echo "Jetson IP: $JETSON_IP"
+echo ""
 echo "Camera topic mapping:"
 echo "  Camera 1: $TOPIC1"
 echo "  Camera 2: $TOPIC2"
@@ -38,8 +54,9 @@ echo "  Camera 6: $TOPIC6"
 echo "  Camera 7: $TOPIC7"
 echo ""
 
-# Set ROS Master URI
+# Set ROS Master URI and Jetson's IP for ROS networking
 export ROS_MASTER_URI="http://$ROS_MASTER_IP:11311"
+export ROS_IP="$JETSON_IP"
 
 # Export all 7 topics
 export ROS_TOPIC_1="$TOPIC1"
