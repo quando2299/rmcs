@@ -225,6 +225,9 @@ func (r *ROSSubscriber) initGStreamer() error {
 
 	r.cmd = exec.Command("gst-launch-1.0", "-q", pipeline)
 
+	// Log the exact command being executed for debugging
+	log.Printf("GStreamer command: gst-launch-1.0 -q %s", pipeline)
+
 	// Get stdin pipe for writing raw BGR frames
 	gstStdin, err := r.cmd.StdinPipe()
 	if err != nil {
