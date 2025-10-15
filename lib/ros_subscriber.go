@@ -58,9 +58,6 @@ type ROSSubscriber struct {
 	framesWritten     int
 	framesRead        int
 	lastBenchmarkTime time.Time
-
-	// Frame pacing to prevent bursts
-	lastFrameSentTime time.Time
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
@@ -84,7 +81,6 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 		timeoutDuration:      10 * time.Second, // 10 second timeout for no messages
 		lastMessageTime:      time.Now(),
 		lastBenchmarkTime:    time.Now(),
-		lastFrameSentTime:    time.Time{}, // Zero value means no frame sent yet
 	}
 }
 
@@ -275,12 +271,11 @@ func (r *ROSSubscriber) initGStreamer() error {
 		}
 	}()
 
-	// Reset benchmark counters and frame pacing for new encoder instance
+	// Reset benchmark counters for new encoder instance
 	// NOTE: Caller already holds r.mu lock, so don't lock again
 	r.framesWritten = 0
 	r.framesRead = 0
 	r.lastBenchmarkTime = time.Now()
-	r.lastFrameSentTime = time.Time{} // Reset frame pacing
 
 	// Start reading H.264 stream from GStreamer
 	go r.readH264Stream(stdout)
@@ -316,12 +311,22 @@ func (r *ROSSubscriber) stopGStreamer() {
 }
 
 func (r *ROSSubscriber) Stop() {
+	// Check if already stopped and mark as stopping
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if !r.isRunning {
+		r.mu.Unlock()
 		return
 	}
+	r.isRunning = false
+	r.dimensionInitialized = false
+
+	// Get references to things we need to clean up
+	sub := r.sub
+	node := r.node
+	topicName := r.topicName
+	r.sub = nil
+	r.node = nil
+	r.mu.Unlock()
 
 	// Signal stop to readH264Stream goroutine
 	select {
@@ -329,21 +334,20 @@ func (r *ROSSubscriber) Stop() {
 	default:
 	}
 
-	if r.sub != nil {
-		r.sub.Close()
-		r.sub = nil
+	// Close subscriber (might call callbacks, so done without holding lock)
+	if sub != nil {
+		sub.Close()
 	}
 
+	// Stop GStreamer
 	r.stopGStreamer()
 
-	if r.node != nil {
-		r.node.Close()
-		r.node = nil
+	// Close ROS node
+	if node != nil {
+		node.Close()
 	}
 
-	r.isRunning = false
-	r.dimensionInitialized = false
-	log.Printf("ROS subscriber stopped on topic: %s", r.topicName)
+	log.Printf("ROS subscriber stopped on topic: %s", topicName)
 }
 
 func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
@@ -639,20 +643,6 @@ func (r *ROSSubscriber) extractNextNALUnit(buffer []byte) (nalUnit []byte, remai
 }
 
 func (r *ROSSubscriber) sendNALUnitWithSEI(nalUnit []byte) {
-	// Frame pacing: ensure we don't send frames faster than target FPS
-	r.mu.Lock()
-	targetFrameDuration := time.Duration(r.sampleDurationUs) * time.Microsecond
-	lastSent := r.lastFrameSentTime
-	r.mu.Unlock()
-
-	if !lastSent.IsZero() {
-		elapsed := time.Since(lastSent)
-		if elapsed < targetFrameDuration {
-			// Sleep to maintain frame rate
-			time.Sleep(targetFrameDuration - elapsed)
-		}
-	}
-
 	startCode := []byte{0x00, 0x00, 0x00, 0x01}
 
 	// Get current timestamp in microseconds
@@ -670,17 +660,12 @@ func (r *ROSSubscriber) sendNALUnitWithSEI(nalUnit []byte) {
 
 	err := r.track.WriteSample(media.Sample{
 		Data:     data,
-		Duration: targetFrameDuration,
+		Duration: time.Duration(r.sampleDurationUs) * time.Microsecond,
 	})
 
 	if err != nil && err != io.ErrClosedPipe {
 		log.Printf("Error writing sample: %v", err)
 	}
-
-	// Update last sent time
-	r.mu.Lock()
-	r.lastFrameSentTime = time.Now()
-	r.mu.Unlock()
 }
 
 func (r *ROSSubscriber) sendNALUnitNoSEI(nalUnit []byte) {
