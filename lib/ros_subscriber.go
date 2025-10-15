@@ -53,6 +53,11 @@ type ROSSubscriber struct {
 	// Timeout detection
 	lastMessageTime time.Time
 	timeoutDuration time.Duration
+
+	// Benchmark tracking for encoding latency
+	framesWritten     int
+	framesRead        int
+	lastBenchmarkTime time.Time
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
@@ -62,12 +67,12 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 	topicName := getTopicName(cameraIndex)
 
 	return &ROSSubscriber{
-		track:            track,
-		topicName:        topicName,
-		rosMasterURI:     rosMasterURI,
-		stopChan:         make(chan bool),
-		fps:              fps,
-		sampleDurationUs: 1000000 / uint64(fps),
+		track:             track,
+		topicName:         topicName,
+		rosMasterURI:      rosMasterURI,
+		stopChan:          make(chan bool),
+		fps:               fps,
+		sampleDurationUs:  1000000 / uint64(fps),
 		// Don't initialize dimensions - detect from first frame
 		width:                0,
 		height:               0,
@@ -75,6 +80,7 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 		dimensionInitialized: false,
 		timeoutDuration:      10 * time.Second, // 10 second timeout for no messages
 		lastMessageTime:      time.Now(),
+		lastBenchmarkTime:    time.Now(),
 	}
 }
 
@@ -215,7 +221,7 @@ func (r *ROSSubscriber) initGStreamer() error {
 	// GStreamer pipeline using NVIDIA hardware encoder
 	// Use shell to properly handle the pipeline syntax
 	pipeline := fmt.Sprintf(
-		"gst-launch-1.0 -v fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
+		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
 			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
@@ -253,13 +259,15 @@ func (r *ROSSubscriber) initGStreamer() error {
 		return fmt.Errorf("failed to start GStreamer: %v", err)
 	}
 
-	// Log GStreamer stderr in background (all output for debugging)
+	// Log GStreamer stderr in background (errors and warnings only)
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Log all output to debug hardware encoder
-			log.Printf("[GStreamer ROS] %s", line)
+			// Only log errors and warnings
+			if len(line) > 0 && (line[0] == 'E' || line[0] == 'W') {
+				log.Printf("[GStreamer ROS] %s", line)
+			}
 		}
 	}()
 
@@ -418,6 +426,11 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 			log.Printf("ERROR: Incomplete write to GStreamer. Expected %d bytes, wrote %d bytes", len(msg.Data), n)
 			return
 		}
+
+		// Track frame written for benchmark
+		r.mu.Lock()
+		r.framesWritten++
+		r.mu.Unlock()
 	}
 }
 
@@ -511,14 +524,51 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 				// Send the frame WITH SEI only for video slices (types 1, 5)
 				if nalType == 1 || nalType == 5 {
 					r.sendNALUnitWithSEI(nalUnit)
+					framesSent++
+
+					// Track frame read for benchmark
+					r.mu.Lock()
+					r.framesRead++
+					r.mu.Unlock()
+
+					// Report benchmark every 150 frames (5 seconds at 30fps)
+					if framesSent%150 == 0 {
+						r.reportBenchmark()
+					}
 				} else {
 					r.sendNALUnitNoSEI(nalUnit)
 				}
-
-				framesSent++
 			}
 		}
 	}
+}
+
+func (r *ROSSubscriber) reportBenchmark() {
+	r.mu.Lock()
+	written := r.framesWritten
+	read := r.framesRead
+	fps := r.fps
+	now := time.Now()
+	elapsed := now.Sub(r.lastBenchmarkTime).Seconds()
+	r.lastBenchmarkTime = now
+	r.mu.Unlock()
+
+	bufferedFrames := written - read
+	latencyMs := (float64(bufferedFrames) / float64(fps)) * 1000.0
+
+	var status string
+	if latencyMs < 200 {
+		status = "EXCELLENT"
+	} else if latencyMs < 500 {
+		status = "GOOD"
+	} else if latencyMs < 800 {
+		status = "OK"
+	} else {
+		status = "SLOW"
+	}
+
+	log.Printf("BENCHMARK [%s]: Encoding Latency: %.0fms | Buffer: %d frames | Rate: %.1f fps",
+		status, latencyMs, bufferedFrames, 150.0/elapsed)
 }
 
 func (r *ROSSubscriber) extractNextNALUnit(buffer []byte) (nalUnit []byte, remaining []byte, found bool) {
