@@ -272,11 +272,10 @@ func (r *ROSSubscriber) initGStreamer() error {
 	}()
 
 	// Reset benchmark counters for new encoder instance
-	r.mu.Lock()
+	// NOTE: Caller already holds r.mu lock, so don't lock again
 	r.framesWritten = 0
 	r.framesRead = 0
 	r.lastBenchmarkTime = time.Now()
-	r.mu.Unlock()
 
 	// Start reading H.264 stream from GStreamer
 	go r.readH264Stream(stdout)
