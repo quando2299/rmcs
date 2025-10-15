@@ -215,7 +215,7 @@ func (r *ROSSubscriber) initGStreamer() error {
 	// GStreamer pipeline using NVIDIA hardware encoder
 	// Use shell to properly handle the pipeline syntax
 	pipeline := fmt.Sprintf(
-		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
+		"gst-launch-1.0 -v fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
 			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
@@ -253,15 +253,13 @@ func (r *ROSSubscriber) initGStreamer() error {
 		return fmt.Errorf("failed to start GStreamer: %v", err)
 	}
 
-	// Log GStreamer stderr in background
+	// Log GStreamer stderr in background (all output for debugging)
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Only log errors and warnings
-			if len(line) > 0 && (line[0] == 'E' || line[0] == 'W') {
-				log.Printf("[GStreamer ROS] %s", line)
-			}
+			// Log all output to debug hardware encoder
+			log.Printf("[GStreamer ROS] %s", line)
 		}
 	}()
 
