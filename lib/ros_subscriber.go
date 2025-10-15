@@ -213,27 +213,17 @@ func (r *ROSSubscriber) initGStreamer() error {
 	log.Printf("Starting GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
 
 	// GStreamer pipeline using NVIDIA hardware encoder
-	// Build pipeline as separate arguments for proper parsing
-	args := []string{
-		"-q", // Quiet mode
-		"fdsrc",
-		"!",
-		fmt.Sprintf("rawvideoparse width=%d height=%d format=bgr framerate=%d/1", r.width, r.height, r.fps),
-		"!",
-		"videoconvert",
-		"!",
-		"nvvidconv",
-		"!",
-		"video/x-raw(memory:NVMM),format=NV12",
-		"!",
-		fmt.Sprintf("nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1", r.fps*2),
-		"!",
-		"h264parse",
-		"!",
-		"fdsink",
-	}
+	// Pass pipeline as single string (gst-launch parses this)
+	pipeline := fmt.Sprintf(
+		"fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
+			"videoconvert ! nvvidconv ! "+
+			"video/x-raw(memory:NVMM),format=NV12 ! "+
+			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
+			"h264parse ! fdsink",
+		r.width, r.height, r.fps, r.fps*2,
+	)
 
-	r.cmd = exec.Command("gst-launch-1.0", args...)
+	r.cmd = exec.Command("gst-launch-1.0", "-q", pipeline)
 
 	// Get stdin pipe for writing raw BGR frames
 	gstStdin, err := r.cmd.StdinPipe()
