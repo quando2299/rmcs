@@ -213,21 +213,24 @@ func (r *ROSSubscriber) initGStreamer() error {
 	log.Printf("Starting GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
 
 	// GStreamer pipeline using NVIDIA hardware encoder
-	pipeline := fmt.Sprintf(
-		"fdsrc fd=0 ! "+
-			"rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
-			"videoconvert ! "+
-			"nvvidconv ! "+
-			"video/x-raw(memory:NVMM),format=NV12 ! "+
-			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
-			"h264parse ! "+
-			"fdsink fd=1",
-		r.width, r.height, r.fps, r.fps*2, // iframeinterval = keyframe every 2 seconds
-	)
-
+	// Build pipeline as separate arguments for proper parsing
 	args := []string{
-		"-q", // Quiet mode (reduce logs)
-		pipeline,
+		"-q", // Quiet mode
+		"fdsrc",
+		"!",
+		fmt.Sprintf("rawvideoparse width=%d height=%d format=bgr framerate=%d/1", r.width, r.height, r.fps),
+		"!",
+		"videoconvert",
+		"!",
+		"nvvidconv",
+		"!",
+		"video/x-raw(memory:NVMM),format=NV12",
+		"!",
+		fmt.Sprintf("nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1", r.fps*2),
+		"!",
+		"h264parse",
+		"!",
+		"fdsink",
 	}
 
 	r.cmd = exec.Command("gst-launch-1.0", args...)
@@ -439,7 +442,7 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 			log.Printf("Stopping ROS stream.")
 			return
 		default:
-			// Read data from FFmpeg stdout
+			// Read data from GStreamer stdout
 			n, err := reader.Read(readBuf)
 			if err != nil {
 				if err == io.EOF {
