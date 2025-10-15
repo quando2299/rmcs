@@ -58,6 +58,9 @@ type ROSSubscriber struct {
 	framesWritten     int
 	framesRead        int
 	lastBenchmarkTime time.Time
+
+	// Frame pacing to prevent bursts
+	lastFrameSentTime time.Time
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
@@ -81,6 +84,7 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 		timeoutDuration:      10 * time.Second, // 10 second timeout for no messages
 		lastMessageTime:      time.Now(),
 		lastBenchmarkTime:    time.Now(),
+		lastFrameSentTime:    time.Time{}, // Zero value means no frame sent yet
 	}
 }
 
@@ -271,11 +275,12 @@ func (r *ROSSubscriber) initGStreamer() error {
 		}
 	}()
 
-	// Reset benchmark counters for new encoder instance
+	// Reset benchmark counters and frame pacing for new encoder instance
 	// NOTE: Caller already holds r.mu lock, so don't lock again
 	r.framesWritten = 0
 	r.framesRead = 0
 	r.lastBenchmarkTime = time.Now()
+	r.lastFrameSentTime = time.Time{} // Reset frame pacing
 
 	// Start reading H.264 stream from GStreamer
 	go r.readH264Stream(stdout)
@@ -634,6 +639,20 @@ func (r *ROSSubscriber) extractNextNALUnit(buffer []byte) (nalUnit []byte, remai
 }
 
 func (r *ROSSubscriber) sendNALUnitWithSEI(nalUnit []byte) {
+	// Frame pacing: ensure we don't send frames faster than target FPS
+	r.mu.Lock()
+	targetFrameDuration := time.Duration(r.sampleDurationUs) * time.Microsecond
+	lastSent := r.lastFrameSentTime
+	r.mu.Unlock()
+
+	if !lastSent.IsZero() {
+		elapsed := time.Since(lastSent)
+		if elapsed < targetFrameDuration {
+			// Sleep to maintain frame rate
+			time.Sleep(targetFrameDuration - elapsed)
+		}
+	}
+
 	startCode := []byte{0x00, 0x00, 0x00, 0x01}
 
 	// Get current timestamp in microseconds
@@ -651,12 +670,17 @@ func (r *ROSSubscriber) sendNALUnitWithSEI(nalUnit []byte) {
 
 	err := r.track.WriteSample(media.Sample{
 		Data:     data,
-		Duration: time.Duration(r.sampleDurationUs) * time.Microsecond,
+		Duration: targetFrameDuration,
 	})
 
 	if err != nil && err != io.ErrClosedPipe {
 		log.Printf("Error writing sample: %v", err)
 	}
+
+	// Update last sent time
+	r.mu.Lock()
+	r.lastFrameSentTime = time.Now()
+	r.mu.Unlock()
 }
 
 func (r *ROSSubscriber) sendNALUnitNoSEI(nalUnit []byte) {
