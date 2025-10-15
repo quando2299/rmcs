@@ -287,26 +287,20 @@ func (r *ROSSubscriber) initGStreamer() error {
 }
 
 func (r *ROSSubscriber) stopGStreamer() {
-	// Close stdin first to signal GStreamer to finish
 	if r.gstStdin != nil {
 		r.gstStdin.Close()
 		r.gstStdin = nil
 	}
 
-	// Give GStreamer a moment to flush and exit gracefully
-	time.Sleep(100 * time.Millisecond)
+	if r.gstStdout != nil {
+		r.gstStdout.Close()
+		r.gstStdout = nil
+	}
 
-	// Kill the process if still running
 	if r.cmd != nil && r.cmd.Process != nil {
 		r.cmd.Process.Kill()
 		r.cmd.Wait() // Wait for process to exit
 		r.cmd = nil
-	}
-
-	// Close stdout after process is dead
-	if r.gstStdout != nil {
-		r.gstStdout.Close()
-		r.gstStdout = nil
 	}
 
 	// Clear cached NAL units
@@ -462,15 +456,7 @@ func (r *ROSSubscriber) readH264Stream(reader io.Reader) {
 			// Read data from GStreamer stdout
 			n, err := reader.Read(readBuf)
 			if err != nil {
-				if err == io.EOF {
-					// Expected during normal shutdown
-					return
-				}
-				// "file already closed" is expected during camera switch
-				if err.Error() == "read |0: file already closed" {
-					return
-				}
-				log.Printf("Error reading ROS stream: %v", err)
+				// EOF or pipe closed errors are expected during shutdown/switching
 				return
 			}
 
