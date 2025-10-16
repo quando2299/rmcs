@@ -429,19 +429,8 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		return
 	}
 
-	// Frame rate limiting: drop frames that arrive too fast
+	// Get GStreamer stdin
 	r.mu.Lock()
-	now := time.Now()
-	timeSinceLastFrame := now.Sub(r.lastFrameAcceptTime)
-
-	// Drop frame if it arrives too soon (maintaining max 30fps output)
-	if !r.lastFrameAcceptTime.IsZero() && timeSinceLastFrame < r.minFrameInterval {
-		r.framesDropped++
-		r.mu.Unlock()
-		return // Drop this frame
-	}
-
-	r.lastFrameAcceptTime = now
 	gstStdin := r.gstStdin
 	r.mu.Unlock()
 
