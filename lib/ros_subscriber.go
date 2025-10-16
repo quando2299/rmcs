@@ -58,6 +58,11 @@ type ROSSubscriber struct {
 	framesWritten     int
 	framesRead        int
 	lastBenchmarkTime time.Time
+
+	// Frame rate limiting to prevent bursts
+	lastFrameAcceptTime time.Time
+	minFrameInterval    time.Duration
+	framesDropped       int
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
@@ -67,12 +72,13 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 	topicName := getTopicName(cameraIndex)
 
 	return &ROSSubscriber{
-		track:             track,
-		topicName:         topicName,
-		rosMasterURI:      rosMasterURI,
-		stopChan:          make(chan bool),
-		fps:               fps,
-		sampleDurationUs:  1000000 / uint64(fps),
+		track:               track,
+		topicName:           topicName,
+		rosMasterURI:        rosMasterURI,
+		stopChan:            make(chan bool),
+		fps:                 fps,
+		sampleDurationUs:    1000000 / uint64(fps),
+		minFrameInterval:    time.Duration(1000000/uint64(fps)) * time.Microsecond, // 33.33ms at 30fps
 		// Don't initialize dimensions - detect from first frame
 		width:                0,
 		height:               0,
@@ -81,6 +87,7 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 		timeoutDuration:      10 * time.Second, // 10 second timeout for no messages
 		lastMessageTime:      time.Now(),
 		lastBenchmarkTime:    time.Now(),
+		lastFrameAcceptTime:  time.Time{},
 	}
 }
 
@@ -271,11 +278,13 @@ func (r *ROSSubscriber) initGStreamer() error {
 		}
 	}()
 
-	// Reset benchmark counters for new encoder instance
+	// Reset benchmark counters and frame limiting for new encoder instance
 	// NOTE: Caller already holds r.mu lock, so don't lock again
 	r.framesWritten = 0
 	r.framesRead = 0
+	r.framesDropped = 0
 	r.lastBenchmarkTime = time.Now()
+	r.lastFrameAcceptTime = time.Time{}
 
 	// Start reading H.264 stream from GStreamer
 	go r.readH264Stream(stdout)
@@ -420,8 +429,19 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		return
 	}
 
-	// Write raw BGR data to GStreamer stdin
+	// Frame rate limiting: drop frames that arrive too fast
 	r.mu.Lock()
+	now := time.Now()
+	timeSinceLastFrame := now.Sub(r.lastFrameAcceptTime)
+
+	// Drop frame if it arrives too soon (maintaining max 30fps output)
+	if !r.lastFrameAcceptTime.IsZero() && timeSinceLastFrame < r.minFrameInterval {
+		r.framesDropped++
+		r.mu.Unlock()
+		return // Drop this frame
+	}
+
+	r.lastFrameAcceptTime = now
 	gstStdin := r.gstStdin
 	r.mu.Unlock()
 
@@ -558,10 +578,12 @@ func (r *ROSSubscriber) reportBenchmark() {
 	r.mu.Lock()
 	written := r.framesWritten
 	read := r.framesRead
+	dropped := r.framesDropped
 	fps := r.fps
 	now := time.Now()
 	elapsed := now.Sub(r.lastBenchmarkTime).Seconds()
 	r.lastBenchmarkTime = now
+	r.framesDropped = 0 // Reset counter after reporting
 	r.mu.Unlock()
 
 	bufferedFrames := written - read
@@ -578,8 +600,8 @@ func (r *ROSSubscriber) reportBenchmark() {
 		status = "SLOW"
 	}
 
-	log.Printf("BENCHMARK [%s]: Encoding Latency: %.0fms | Buffer: %d frames | Rate: %.1f fps",
-		status, latencyMs, bufferedFrames, 150.0/elapsed)
+	log.Printf("BENCHMARK [%s]: Latency: %.0fms | Buffer: %d frames | Rate: %.1f fps | Dropped: %d frames",
+		status, latencyMs, bufferedFrames, 150.0/elapsed, dropped)
 }
 
 func (r *ROSSubscriber) extractNextNALUnit(buffer []byte) (nalUnit []byte, remaining []byte, found bool) {
