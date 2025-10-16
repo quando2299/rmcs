@@ -224,9 +224,9 @@ func (r *ROSSubscriber) initGStreamer() error {
 		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
-			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 iframeinterval=%d control-rate=1 ! "+
-			"h264parse ! fdsink",
-		r.width, r.height, r.fps, r.fps*2,
+			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 idrinterval=%d control-rate=1 ! "+
+			"h264parse config-interval=-1 ! fdsink",
+		r.width, r.height, r.fps,
 	)
 
 	r.cmd = exec.Command("/bin/sh", "-c", pipeline)
