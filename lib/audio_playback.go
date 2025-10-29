@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"io"
 	"log"
@@ -47,7 +48,7 @@ func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 			jb.readIdx = (jb.readIdx + 1) % len(jb.buffer)
 			jb.count--
 			jb.underrunCount++ // Count as underrun for stats
-			log.Printf("Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
+			log.Printf("⚠️ Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
 		}
 	}
 
@@ -172,18 +173,20 @@ func (a *AudioPlayback) StartDecoder() error {
 	var args []string
 	
 	if a.deviceInfo.UsePulseAudio {
-		// PulseAudio output - High volume (safe since mic is 30%)
+		// PulseAudio output - Let PulseAudio handle format conversion (mono/stereo, sample rate)
+		// FFmpeg sends stereo 48kHz, PulseAudio converts to device native format automatically
 		args = []string{
 			"-f", "s16le",        // PCM 16-bit signed little-endian
-			"-ar", "48000",       // Output 48kHz → PulseAudio resamples to AEC 44.1kHz (after decode)
-			"-ac", "2",           // Stereo
+			"-ar", "48000",       // Input rate: 48kHz (Opus decoded)
+			"-ac", "2",           // Input channels: Stereo (Opus decoded)
 			"-i", "pipe:0",       // Read from stdin
 			// Audio processing for clarity and volume:
-			// 1. equalizer: boost mid-range (voice frequencies 300-3000Hz)
-			// 2. volume: 6x boost (safe with 30% mic sensitivity)
-			// 3. compressor: prevent clipping from high volume
-			"-af", "equalizer=f=1000:width_type=h:width=2000:g=3,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
-			"-f", "pulse",        // Output to PulseAudio
+			// 1. Convert stereo → device channels (PulseAudio handles this)
+			// 2. equalizer: boost mid-range (voice frequencies 300-3000Hz)
+			// 3. volume: 6x boost (safe with low mic sensitivity)
+			// 4. compressor: prevent clipping from high volume
+			"-af", "aformat=sample_fmts=s16:channel_layouts=stereo,equalizer=f=1000:width_type=h:width=2000:g=3,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
+			"-f", "pulse",        // Output to PulseAudio (handles device conversion)
 			a.deviceInfo.OutputDevice,
 		}
 	} else {
@@ -205,6 +208,24 @@ func (a *AudioPlayback) StartDecoder() error {
 	if err != nil {
 		return err
 	}
+
+	// Capture stderr for debugging FFmpeg errors - vnextthongnv
+	stderr, err := a.cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	// Log FFmpeg errors in background
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Log all output to diagnose playback issues
+			if len(line) > 0 {
+				log.Printf("FFmpeg playback: %s", line)
+			}
+		}
+	}()
 
 	if err := a.cmd.Start(); err != nil {
 		log.Printf("ERROR: Failed to start audio playback: %v", err) // vnextthongnv
@@ -233,9 +254,7 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 	packetCount := 0
 	emptyPayloadCount := 0
 	
-	log.Println("✓ Decoder thread started, waiting for RTP packets from browser...")
-	log.Printf("   Track info: Kind=%s, Codec=%s, SSRC=%d", 
-		track.Kind().String(), track.Codec().MimeType, track.SSRC())
+	log.Println("✓ Decoder thread started")
 	
 	for a.running {
 		// Read RTP packet with Opus payload
@@ -248,11 +267,6 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 		}
 
 		packetCount++
-		
-		// Log first RTP packet arrival
-		if packetCount == 1 {
-			log.Printf("🎉 FIRST RTP packet received from browser! Starting audio decode...")
-		}
 		
 		// Check payload size - vnextthongnv
 		if len(rtp.Payload) == 0 {
@@ -378,21 +392,15 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 // PlaybackLoop starts both decode and playback threads - vnextthongnv
 // Exported so it can be called from webrtc.go OnTrack handler
 func (a *AudioPlayback) PlaybackLoop(track *webrtc.TrackRemote) {
-	log.Println("=== Starting jitter-buffered audio playback (browser mic → VM speaker) ===")
-	log.Printf("    Remote track: Kind=%s, Codec=%s, SSRC=%d, ID=%s", 
-		track.Kind().String(), track.Codec().MimeType, track.SSRC(), track.ID())
+	log.Println("=== Starting jitter-buffered audio playback ===")
 	
 	// Start decoder thread (reads RTP → decodes → enqueues)
 	a.wg.Add(1)
 	go a.DecodeLoop(track)
-	log.Println("    ✓ Decoder thread launched")
 	
 	// Start playback thread (dequeues → writes FFmpeg at 20ms rate)
 	a.wg.Add(1)
 	go a.TimedPlaybackLoop()
-	log.Println("    ✓ Playback thread launched")
-	
-	log.Println("=== Both audio playback threads running, waiting for browser audio... ===")
 	
 	// Wait for both threads to complete
 	a.wg.Wait()
