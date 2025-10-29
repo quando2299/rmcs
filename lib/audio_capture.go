@@ -167,7 +167,6 @@ func (a *AudioCapture) captureLoop() {
 	opusBuffer := make([]byte, 4000)              // Output: max Opus frame size
 	
 	packetCount := 0
-	startTime := time.Now()
 	
 	log.Printf("PCM→Opus: Frame size: %d bytes, Duration: %v, Expected rate: 50 pkt/s", 
 		pcmFrameSize, frameDuration)
