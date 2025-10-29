@@ -107,24 +107,6 @@ func (a *AudioCapture) Start() error {
 		return err
 	}
 
-	// Capture stderr for debugging
-	stderr, err := a.cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	// Log FFmpeg errors in background
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Only log errors/warnings, skip info messages
-			if len(line) > 0 {
-				log.Printf("FFmpeg capture: %s", line)
-			}
-		}
-	}()
-
 	if err := a.cmd.Start(); err != nil {
 		log.Printf("ERROR: Failed to start audio capture: %v", err) //
 		return err
@@ -167,6 +149,7 @@ func (a *AudioCapture) captureLoop() {
 	opusBuffer := make([]byte, 4000)              // Output: max Opus frame size
 	
 	packetCount := 0
+	startTime := time.Now()
 	
 	log.Printf("PCM→Opus: Frame size: %d bytes, Duration: %v, Expected rate: 50 pkt/s", 
 		pcmFrameSize, frameDuration)
@@ -234,6 +217,14 @@ func (a *AudioCapture) captureLoop() {
 				continue
 			}
 			break
+		}
+		
+		// Periodic stats
+		if packetCount%50 == 0 {
+			elapsed := time.Since(startTime)
+			avgRate := float64(packetCount) / elapsed.Seconds()
+			log.Printf("DEBUG: PCM -> Opus - Packets: %d, PCM: %d bytes, Opus: %d bytes, Rate: %.1f pkt/s", 
+				packetCount, pcmFrameSize, opusLen, avgRate)
 		}
 	}
 	

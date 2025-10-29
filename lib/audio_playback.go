@@ -204,24 +204,6 @@ func (a *AudioPlayback) StartDecoder() error {
 		return err
 	}
 
-	// Capture stderr for debugging FFmpeg errors
-	stderr, err := a.cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	// Log FFmpeg errors in background
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// Log all output to diagnose playback issues
-			if len(line) > 0 {
-				log.Printf("FFmpeg playback: %s", line)
-			}
-		}
-	}()
-
 	if err := a.cmd.Start(); err != nil {
 		log.Printf("ERROR: Failed to start audio playback: %v", err) // vnextthongnv
 		return err
