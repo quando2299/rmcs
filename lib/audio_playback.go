@@ -13,7 +13,7 @@ import (
 	opus "gopkg.in/hraban/opus.v2"
 )
 
-// JitterBuffer manages packet buffering for smooth playback - vnextthongnv
+// JitterBuffer manages packet buffering for smooth playback
 type JitterBuffer struct {
 	buffer       [10][]byte // Ring buffer: 10 packets = 200ms at 20ms/packet
 	writeIdx     int        // Write position
@@ -26,7 +26,7 @@ type JitterBuffer struct {
 	cond         *sync.Cond // Signal for buffer state changes
 }
 
-// NewJitterBuffer creates jitter buffer with prebuffering - vnextthongnv
+// NewJitterBuffer creates jitter buffer with prebuffering
 func NewJitterBuffer(prebufferPackets int) *JitterBuffer {
 	jb := &JitterBuffer{
 		prebuffer: prebufferPackets,
@@ -36,19 +36,19 @@ func NewJitterBuffer(prebufferPackets int) *JitterBuffer {
 	return jb
 }
 
-// Enqueue adds decoded PCM packet to buffer - vnextthongnv
+// Enqueue adds decoded PCM packet to buffer
 func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 	jb.mu.Lock()
 	defer jb.mu.Unlock()
 
-	// Smart overflow handling: drop oldest packet if buffer near full - vnextthongnv
+	// Smart overflow handling: drop oldest packet if buffer near full
 	if jb.count >= len(jb.buffer)-1 {
 		// Buffer at 9/10 or full - drop OLDEST packet (maintain recency)
 		if jb.count > 0 {
 			jb.readIdx = (jb.readIdx + 1) % len(jb.buffer)
 			jb.count--
 			jb.underrunCount++ // Count as underrun for stats
-			log.Printf("⚠️ Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
+			log.Printf("Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
 		}
 	}
 
@@ -60,7 +60,7 @@ func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 	// Start playback after prebuffer reached
 	if !jb.started && jb.count >= jb.prebuffer {
 		jb.started = true
-		log.Printf("✓ Jitter buffer prebuffered (%d packets, %dms) - starting playback", 
+		log.Printf("Jitter buffer prebuffered (%d packets, %dms) - starting playback", 
 			jb.prebuffer, jb.prebuffer*20)
 	}
 
@@ -69,7 +69,7 @@ func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 	return true
 }
 
-// Dequeue retrieves next packet or generates PLC - vnextthongnv
+// Dequeue retrieves next packet or generates PLC
 func (jb *JitterBuffer) Dequeue(decoder *opus.Decoder) []byte {
 	jb.mu.Lock()
 	defer jb.mu.Unlock()
@@ -90,11 +90,11 @@ func (jb *JitterBuffer) Dequeue(decoder *opus.Decoder) []byte {
 	// Buffer empty: generate PLC audio (underrun or intentional drop)
 	jb.underrunCount++
 	if jb.underrunCount <= 5 || jb.underrunCount%50 == 0 {
-		log.Printf("⚠️ Jitter buffer empty #%d - using PLC", jb.underrunCount)
+		log.Printf("Jitter buffer empty #%d - using PLC", jb.underrunCount)
 	}
 
 	// Generate PLC audio (20ms silence/comfort noise)
-	pcmData := make([]int16, 1920) // 960 samples/channel × 2 channels (48kHz)
+	pcmData := make([]int16, 1920) // 960 samples/channel x 2 channels (48kHz)
 	n, err := decoder.Decode(nil, pcmData) // nil = PLC mode
 	if err != nil || n == 0 {
 		// Return silence if PLC fails
@@ -113,14 +113,14 @@ func (jb *JitterBuffer) Dequeue(decoder *opus.Decoder) []byte {
 	return pcmBytes
 }
 
-// GetStats returns buffer statistics - vnextthongnv
+// GetStats returns buffer statistics
 func (jb *JitterBuffer) GetStats() (buffered int, underruns int) {
 	jb.mu.Lock()
 	defer jb.mu.Unlock()
 	return jb.count, jb.underrunCount
 }
 
-// AudioPlayback receives audio from WebRTC and plays to speaker - vnextthongnv
+// AudioPlayback receives audio from WebRTC and plays to speaker
 type AudioPlayback struct {
 	peerConnection *webrtc.PeerConnection
 	cmd            *exec.Cmd
@@ -133,7 +133,7 @@ type AudioPlayback struct {
 	wg             sync.WaitGroup // Track goroutines
 }
 
-// NewAudioPlayback creates audio playback instance - vnextthongnv
+// NewAudioPlayback creates audio playback instance
 func NewAudioPlayback() *AudioPlayback {
 	deviceInfo := DetectAudioDevices()
 	return &AudioPlayback{
@@ -143,7 +143,7 @@ func NewAudioPlayback() *AudioPlayback {
 	}
 }
 
-// StartDecoder initializes the Opus decoder and FFmpeg for audio playback - vnextthongnv
+// StartDecoder initializes the Opus decoder and FFmpeg for audio playback
 func (a *AudioPlayback) StartDecoder() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -152,8 +152,8 @@ func (a *AudioPlayback) StartDecoder() error {
 		return nil
 	}
 
-	// Initialize Opus decoder (48kHz stereo) - vnextthongnv
-	// NOTE: Opus 48kHz → FFmpeg outputs 48kHz → AEC receives 44.1kHz (FFmpeg resamples)
+	// Initialize Opus decoder (48kHz stereo)
+	// NOTE: Opus 48kHz -> FFmpeg outputs 48kHz -> AEC receives 44.1kHz (FFmpeg resamples)
 	var err error
 	a.decoder, err = opus.NewDecoder(48000, 2)
 	if err != nil {
@@ -162,14 +162,14 @@ func (a *AudioPlayback) StartDecoder() error {
 	}
 	log.Println("Opus decoder initialized (48kHz stereo)")
 
-	// Set speaker volume for clear, loud playback - vnextthongnv
+	// Set speaker volume for clear, loud playback
 	log.Println("Audio: Preparing speaker for playback...")
 	if err := a.deviceInfo.SetSpeakerVolume(); err != nil {
 		log.Printf("Warning: Speaker volume setting failed, continuing anyway: %v", err)
 	}
 
-	// Build FFmpeg command with device detection - vnextthongnv
-	// Now using PCM input (s16le) instead of raw Opus - vnextthongnv
+	// Build FFmpeg command with device detection
+	// Now using PCM input (s16le) instead of raw Opus
 	var args []string
 	
 	if a.deviceInfo.UsePulseAudio {
@@ -180,11 +180,6 @@ func (a *AudioPlayback) StartDecoder() error {
 			"-ar", "48000",       // Input rate: 48kHz (Opus decoded)
 			"-ac", "2",           // Input channels: Stereo (Opus decoded)
 			"-i", "pipe:0",       // Read from stdin
-			// Audio processing for clarity and volume:
-			// 1. Convert stereo → device channels (PulseAudio handles this)
-			// 2. highpass/lowpass: focus on voice frequencies (80Hz-8000Hz)
-			// 3. volume: 6x boost (safe with low mic sensitivity)
-			// 4. compressor: prevent clipping from high volume
 			"-af", "aformat=sample_fmts=s16:channel_layouts=stereo,highpass=f=80,lowpass=f=8000,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
 			"-f", "pulse",        // Output to PulseAudio (handles device conversion)
 			a.deviceInfo.OutputDevice,
@@ -209,7 +204,7 @@ func (a *AudioPlayback) StartDecoder() error {
 		return err
 	}
 
-	// Capture stderr for debugging FFmpeg errors - vnextthongnv
+	// Capture stderr for debugging FFmpeg errors
 	stderr, err := a.cmd.StderrPipe()
 	if err != nil {
 		return err
@@ -237,24 +232,24 @@ func (a *AudioPlayback) StartDecoder() error {
 	audioSystem := "PulseAudio"
 	aecInfo := ""
 	if a.deviceInfo.UsePulseAudio && a.deviceInfo.OutputDevice == "echocancel_sink" {
-		aecInfo = " [48kHz → PulseAudio resample AEC 44.1kHz]"
+		aecInfo = " [48kHz -> PulseAudio resample AEC 44.1kHz]"
 	}
 	if !a.deviceInfo.UsePulseAudio {
 		audioSystem = "ALSA"
 	}
-	log.Printf("✅ Audio playback started (%s%s)", audioSystem, aecInfo)
+	log.Printf("Audio playback started (%s%s)", audioSystem, aecInfo)
 
 	return nil
 }
 
-// DecodeLoop reads RTP packets and decodes to jitter buffer - vnextthongnv
+// DecodeLoop reads RTP packets and decodes to jitter buffer
 func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 	defer a.wg.Done()
 	
 	packetCount := 0
 	emptyPayloadCount := 0
 	
-	log.Println("✓ Decoder thread started")
+	log.Println("Decoder thread started")
 	
 	for a.running {
 		// Read RTP packet with Opus payload
@@ -268,7 +263,7 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 
 		packetCount++
 		
-		// Check payload size - vnextthongnv
+		// Check payload size
 		if len(rtp.Payload) == 0 {
 			emptyPayloadCount++
 			if emptyPayloadCount <= 5 {
@@ -280,13 +275,13 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 			continue
 		}
 		
-		// Log first few packets for debugging - vnextthongnv
+		// Log first few packets for debugging
 		if packetCount <= 3 {
 			log.Printf("RTP packet %d: PayloadType=%d, Payload=%d bytes, Timestamp=%d", 
 				packetCount, rtp.PayloadType, len(rtp.Payload), rtp.Timestamp)
 		}
 
-		// Decode Opus payload to PCM - vnextthongnv
+		// Decode Opus payload to PCM
 		pcmData := make([]int16, 1920) // 960 samples/channel × 2 channels = 1920 total (48kHz)
 		n, err := a.decoder.Decode(rtp.Payload, pcmData)
 		if err != nil {
@@ -301,25 +296,25 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 		channels := 2
 		totalSamples := n * channels // 960 × 2 = 1920 for stereo (48kHz)
 		
-		// Log successful decode on first packet - vnextthongnv
+		// Log successful decode on first packet
 		if packetCount == 1 {
-			log.Printf("✓ First Opus decode successful: %d bytes → %d samples/ch × %d ch = %d total PCM samples (48kHz)", 
+			log.Printf("First Opus decode successful: %d bytes -> %d samples/ch × %d ch = %d total PCM samples (48kHz)", 
 				len(rtp.Payload), n, channels, totalSamples)
 		}
 
 		// Trim to actual decoded samples (interleaved stereo)
 		pcmData = pcmData[:totalSamples]
 
-		// Convert int16 PCM to bytes - vnextthongnv
+		// Convert int16 PCM to bytes
 		pcmBytes := make([]byte, len(pcmData)*2) // Each int16 sample = 2 bytes
 		for i, sample := range pcmData {
 			binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
 		}
 
-		// Enqueue to jitter buffer - vnextthongnv
+		// Enqueue to jitter buffer
 		a.jitterBuffer.Enqueue(pcmBytes)
 		
-		// Periodic stats logging - vnextthongnv
+		// Periodic stats logging
 		if packetCount%100 == 0 {
 			buffered, drops := a.jitterBuffer.GetStats()
 			log.Printf("Jitter buffer stats @ packet %d: buffered=%d, drops=%d", 
@@ -327,10 +322,10 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 		}
 	}
 
-	log.Println("✓ Decoder thread stopped")
+	log.Println("Decoder thread stopped")
 }
 
-// TimedPlaybackLoop dequeues from jitter buffer with drift compensation - vnextthongnv
+// TimedPlaybackLoop dequeues from jitter buffer with drift compensation
 func (a *AudioPlayback) TimedPlaybackLoop() {
 	defer a.wg.Done()
 	
@@ -338,13 +333,13 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 	useDummyPlayback := false
 	writeCount := 0
 	
-	// Precise timing with simple ticker - vnextthongnv
+	// Precise timing with simple ticker
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	
 	startTime := time.Now()
 	
-	log.Println("✓ Playback thread started (20ms precise ticker)")
+	log.Println("Playback thread started (20ms precise ticker)")
 	
 	for a.running {
 		<-ticker.C  // Wait for next tick
@@ -353,7 +348,7 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 		pcmBytes := a.jitterBuffer.Dequeue(a.decoder)
 		
 		if !useDummyPlayback {
-			// Write PCM data to FFmpeg stdin - vnextthongnv
+			// Write PCM data to FFmpeg stdin
 			if _, err := a.stdin.Write(pcmBytes); err != nil {
 				if a.running {
 					log.Printf("Audio playback write error: %v", err)
@@ -371,12 +366,12 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 		
 		writeCount++
 		
-		// Log playback start - vnextthongnv
+		// Log playback start
 		if writeCount == 1 {
-			log.Printf("✓ First audio frame written to FFmpeg (playback started)")
+			log.Printf("First audio frame written to FFmpeg (playback started)")
 		}
 		
-		// Periodic stats - vnextthongnv
+		// Periodic stats
 		if writeCount%100 == 0 {
 			buf, drops := a.jitterBuffer.GetStats()
 			elapsed := time.Since(startTime)
@@ -386,19 +381,19 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 		}
 	}
 
-	log.Println("✓ Playback thread stopped")
+	log.Println("Playback thread stopped")
 }
 
-// PlaybackLoop starts both decode and playback threads - vnextthongnv
+// PlaybackLoop starts both decode and playback threads
 // Exported so it can be called from webrtc.go OnTrack handler
 func (a *AudioPlayback) PlaybackLoop(track *webrtc.TrackRemote) {
 	log.Println("=== Starting jitter-buffered audio playback ===")
 	
-	// Start decoder thread (reads RTP → decodes → enqueues)
+	// Start decoder thread (reads RTP -> decodes -> enqueues)
 	a.wg.Add(1)
 	go a.DecodeLoop(track)
 	
-	// Start playback thread (dequeues → writes FFmpeg at 20ms rate)
+	// Start playback thread (dequeues -> writes FFmpeg at 20ms rate)
 	a.wg.Add(1)
 	go a.TimedPlaybackLoop()
 	
@@ -408,7 +403,7 @@ func (a *AudioPlayback) PlaybackLoop(track *webrtc.TrackRemote) {
 	log.Println("=== Audio playback threads stopped ===")
 }
 
-// Stop ends audio playback - vnextthongnv
+// Stop ends audio playback
 func (a *AudioPlayback) Stop() {
 	a.mu.Lock()
 	

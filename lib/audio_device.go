@@ -16,14 +16,14 @@ var (
 	aecModuleLoadMutex  sync.Mutex
 )
 
-// AudioDeviceInfo contains audio device detection info - vnextthongnv
+// AudioDeviceInfo contains audio device detection info
 type AudioDeviceInfo struct {
 	UsePulseAudio bool
 	InputDevice   string
 	OutputDevice  string
 }
 
-// DetectAudioDevices detects available audio system and devices - vnextthongnv
+// DetectAudioDevices detects available audio system and devices
 func DetectAudioDevices() *AudioDeviceInfo {
 	info := &AudioDeviceInfo{
 		UsePulseAudio: false,
@@ -34,7 +34,7 @@ func DetectAudioDevices() *AudioDeviceInfo {
 	// Check for PulseAudio
 	if checkPulseAudio() {
 		info.UsePulseAudio = true
-		log.Println("Audio: Using PulseAudio") // vnextthongnv
+		log.Println("Audio: Using PulseAudio") 
 		
 	// Get PulseAudio devices
 	if sources := getPulseAudioSources(); len(sources) > 0 {
@@ -46,21 +46,21 @@ func DetectAudioDevices() *AudioDeviceInfo {
 			if source == echoCancelSource {
 				info.InputDevice = echoCancelSource
 				found = true
-				log.Println("✅ Using echo-cancel source (AEC INPUT)")
+				log.Println("Using echo-cancel source (AEC INPUT)")
 				break
 			}
 		}
 		
 		if !found {
 			info.InputDevice = sources[0]
-			log.Printf("⚠️ WARNING: echocancel_source NOT found, using %s (NO AEC!)", sources[0])
+			log.Printf("WARNING: echocancel_source NOT found, using %s (NO AEC!)", sources[0])
 		} else {
-			log.Printf("✅ AEC Input device: %s", info.InputDevice)
+			log.Printf("AEC Input device: %s", info.InputDevice)
 		}
 	}
 		
 		if sinks := getPulseAudioSinks(); len(sinks) > 0 {
-			// Prioritize echo-cancel sink for echo cancellation (CRITICAL!)
+			// Prioritize echo-cancel sink for echo cancellation
 			echoCancelSink := "echocancel_sink"
 			found := false
 			
@@ -68,48 +68,48 @@ func DetectAudioDevices() *AudioDeviceInfo {
 			if sink == echoCancelSink {
 				info.OutputDevice = echoCancelSink
 				found = true
-				log.Println("✅ Using echo-cancel sink (AEC OUTPUT)")
+				log.Println("Using echo-cancel sink (AEC OUTPUT)")
 				break
 			}
 		}
 		
 		if !found {
 			info.OutputDevice = sinks[0]
-			log.Printf("⚠️ WARNING: echocancel_sink NOT found, using %s (NO AEC!)", sinks[0])
+			log.Printf("WARNING: echocancel_sink NOT found, using %s (NO AEC!)", sinks[0])
 		} else {
-			log.Printf("✅ AEC Output device: %s", info.OutputDevice)
+			log.Printf("AEC Output device: %s", info.OutputDevice)
 		}
 		}
 	} else if checkALSA() {
 		info.UsePulseAudio = false
-		log.Println("Audio: Using ALSA") // vnextthongnv
+		log.Println("Audio: Using ALSA") 
 		
 		// ALSA default devices
 		info.InputDevice = "hw:0,0"
 		info.OutputDevice = "hw:0,0"
-		log.Printf("Audio: ALSA devices: %s", info.InputDevice) // vnextthongnv
+		log.Printf("Audio: ALSA devices: %s", info.InputDevice) 
 	} else {
-		log.Println("Warning: No audio system detected, using defaults") // vnextthongnv
+		log.Println("Warning: No audio system detected, using defaults") 
 	}
 
 	return info
 }
 
-// checkPulseAudio checks if PulseAudio is available - vnextthongnv
+// checkPulseAudio checks if PulseAudio is available
 func checkPulseAudio() bool {
 	cmd := exec.Command("pactl", "info")
 	err := cmd.Run()
 	return err == nil
 }
 
-// checkALSA checks if ALSA is available - vnextthongnv
+// checkALSA checks if ALSA is available
 func checkALSA() bool {
 	cmd := exec.Command("arecord", "-l")
 	err := cmd.Run()
 	return err == nil
 }
 
-// getPulseAudioSources gets available PulseAudio input sources - vnextthongnv
+// getPulseAudioSources gets available PulseAudio input sources
 func getPulseAudioSources() []string {
 	// Load AEC module FIRST (but only once globally)
 	loadEchoCancelModuleOnce()
@@ -145,7 +145,7 @@ func verifyAECStatus() {
 	cmd := exec.Command("pactl", "list", "short", "sources")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Println("⚠️ Cannot verify AEC status (pactl failed)")
+		log.Println("Cannot verify AEC status (pactl failed)")
 		return
 	}
 	
@@ -159,19 +159,19 @@ func verifyAECStatus() {
 				format := fields[3]
 				channels := fields[4]
 				rate := fields[5]
-				log.Printf("✅ AEC Source: %s (format: %s, %s ch, rate: %s)", 
+				log.Printf("AEC Source: %s (format: %s, %s ch, rate: %s)", 
 					fields[1], format, channels, rate)
 				
 				// Info about format (not a warning - this is expected for WebRTC AEC)
 				if format == "float32le" {
-					log.Printf("📌 INFO: AEC uses float32le (WebRTC internal format), PulseAudio converts to s16le for FFmpeg")
+					log.Printf("INFO: AEC uses float32le (WebRTC internal format), PulseAudio converts to s16le for FFmpeg")
 				} else if format != "s16le" {
-					log.Printf("⚠️  Unexpected AEC format: %s", format)
+					log.Printf(" Unexpected AEC format: %s", format)
 				}
 				
 				// Check rate is 48kHz (closest WebRTC-supported rate to 44.1kHz hardware)
 				if rate != "48000Hz" {
-					log.Printf("⚠️  WARNING: AEC rate %s ≠ 48000Hz (expected) - should be 48kHz!", rate)
+					log.Printf(" WARNING: AEC rate %s ≠ 48000Hz (expected) - should be 48kHz!", rate)
 				}
 				aecSourceFound = true
 			}
@@ -180,7 +180,7 @@ func verifyAECStatus() {
 	}
 	
 	if !aecSourceFound {
-		log.Println("❌ WARNING: echocancel_source NOT FOUND - AEC NOT WORKING!")
+		log.Println(" WARNING: echocancel_source NOT FOUND - AEC NOT WORKING!")
 	}
 	
 	// Check if echocancel_sink exists
@@ -199,19 +199,19 @@ func verifyAECStatus() {
 				format := fields[3]
 				channels := fields[4]
 				rate := fields[5]
-				log.Printf("✅ AEC Sink: %s (format: %s, %s ch, rate: %s)", 
+				log.Printf("AEC Sink: %s (format: %s, %s ch, rate: %s)", 
 					fields[1], format, channels, rate)
 				
 				// Info about format (not a warning - this is expected for WebRTC AEC)
 				if format == "float32le" {
-					log.Printf("📌 INFO: AEC uses float32le (WebRTC internal format), PulseAudio converts to s16le for FFmpeg")
+					log.Printf("INFO: AEC uses float32le (WebRTC internal format), PulseAudio converts to s16le for FFmpeg")
 				} else if format != "s16le" {
-					log.Printf("⚠️  Unexpected AEC format: %s", format)
+					log.Printf(" Unexpected AEC format: %s", format)
 				}
 				
 				// Check rate is 48kHz (closest WebRTC-supported rate to 44.1kHz hardware)
 				if rate != "48000Hz" {
-					log.Printf("⚠️  WARNING: AEC rate %s ≠ 48000Hz (expected) - should be 48kHz!", rate)
+					log.Printf(" WARNING: AEC rate %s ≠ 48000Hz (expected) - should be 48kHz!", rate)
 				}
 				aecSinkFound = true
 			}
@@ -220,11 +220,11 @@ func verifyAECStatus() {
 	}
 	
 	if !aecSinkFound {
-		log.Println("❌ WARNING: echocancel_sink NOT FOUND - AEC NOT WORKING!")
+		log.Println("WARNING: echocancel_sink NOT FOUND - AEC NOT WORKING!")
 	}
 	
 	if aecSourceFound && aecSinkFound {
-		log.Println("✅ ========== AEC MODULE VERIFIED AND ACTIVE ==========")
+		log.Println("========== AEC MODULE VERIFIED AND ACTIVE ==========")
 	}
 }
 
@@ -234,7 +234,7 @@ func loadEchoCancelModuleOnce() {
 	defer aecModuleLoadMutex.Unlock()
 	
 	if aecModuleLoaded {
-		log.Println("📌 AEC module already loaded, skipping reload")
+		log.Println("AEC module already loaded, skipping reload")
 		return
 	}
 	
@@ -248,7 +248,7 @@ func loadEchoCancelModule() {
 	checkCmd := exec.Command("pactl", "list", "modules", "short")
 	output, err := checkCmd.Output()
 	if err == nil && strings.Contains(string(output), "module-echo-cancel") {
-		log.Println("⚠️  Old PulseAudio echo-cancel module found, unloading to apply new settings...")
+		log.Println(" Old PulseAudio echo-cancel module found, unloading to apply new settings...")
 		
 		// Parse module ID and unload
 		lines := strings.Split(string(output), "\n")
@@ -259,9 +259,9 @@ func loadEchoCancelModule() {
 					moduleID := fields[0]
 					unloadCmd := exec.Command("pactl", "unload-module", moduleID)
 					if err := unloadCmd.Run(); err != nil {
-						log.Printf("⚠️  Failed to unload old module: %v", err)
+						log.Printf(" Failed to unload old module: %v", err)
 					} else {
-						log.Println("✅ Old AEC module unloaded, will reload with correct format")
+						log.Println("Old AEC module unloaded, will reload with correct format")
 					}
 					break
 				}
@@ -276,20 +276,10 @@ func loadEchoCancelModule() {
 	defaultSource := getDefaultPulseAudioSource()
 	defaultSink := getDefaultPulseAudioSink()
 	
-	// Load echo cancellation module
-	// CRITICAL: WebRTC AEC only supports 8k/16k/32k/48k (NOT 44.1k!)
-	// Hardware is 44.1kHz, but must use 48kHz (closest supported rate)
-	// Resample 44.1→48kHz happens inside PulseAudio AEC module
-	//
-	// Aggressive AEC settings (MUST be comma-separated for PulseAudio parsing):
-	// - extended_filter=1: Enhanced echo tracking (longer filter)
-	// - delay_agnostic=1: Robust to timing variations (important for resampling)
-	// - experimental_agc=1: Auto gain control
-	// - high_pass_filter=1: Remove low-frequency rumble
 	cmd := exec.Command("pactl", "load-module", "module-echo-cancel",
 		"use_master_format=1",  // Use hardware format
 		"aec_method=webrtc",
-		"aec_args=\"extended_filter=1,delay_agnostic=1,experimental_agc=1,high_pass_filter=1\"",  // COMMA-separated (critical!)
+		"aec_args=\"extended_filter=1,delay_agnostic=1,experimental_agc=1,high_pass_filter=1\"",
 		fmt.Sprintf("source_master=%s", defaultSource),  // Hardware mic
 		fmt.Sprintf("sink_master=%s", defaultSink),      // Hardware speaker
 		"source_name=echocancel_source",
@@ -298,12 +288,12 @@ func loadEchoCancelModule() {
 		"channels=2")            // Stereo
 	
 	if err := cmd.Run(); err != nil {
-		log.Printf("❌ WARNING: Failed to load PulseAudio echo-cancel module: %v", err)
-		log.Println("❌ Continuing with standard audio capture (WILL HAVE ECHO)")
+		log.Printf(" WARNING: Failed to load PulseAudio echo-cancel module: %v", err)
+		log.Println(" Continuing with standard audio capture (WILL HAVE ECHO)")
 	} else {
-		log.Println("✅ PulseAudio echo-cancel module loaded successfully")
-		log.Println("✅ AEC ACTIVE: WebRTC method (rate=48000Hz - AGGRESSIVE MODE)")
-		log.Println("📌 Settings: extended_filter + delay_agnostic + experimental_agc + high_pass_filter")
+		log.Println("PulseAudio echo-cancel module loaded successfully")
+		log.Println("AEC ACTIVE: WebRTC method (rate=48000Hz)")
+		log.Println("Settings: extended_filter + delay_agnostic + experimental_agc + high_pass_filter")
 		
 		// Wait for devices to register (critical for detection)
 		time.Sleep(200 * time.Millisecond)
@@ -337,7 +327,7 @@ func getDefaultPulseAudioSource() string {
 	cmd = exec.Command("pactl", "list", "short", "sources")
 	output, err = cmd.Output()
 	if err != nil {
-		log.Println("⚠️ Failed to query PulseAudio sources, using 'default'")
+		log.Println("Failed to query PulseAudio sources, using 'default'")
 		return "default"
 	}
 	
@@ -355,7 +345,7 @@ func getDefaultPulseAudioSource() string {
 			if strings.Contains(sourceName, "usb") && 
 			   !strings.Contains(sourceName, "monitor") && 
 			   !strings.Contains(sourceName, "echocancel") {
-				log.Printf("✅ Found USB hardware source (preferred): %s", sourceName)
+				log.Printf("Found USB hardware source (preferred): %s", sourceName)
 				return sourceName
 			}
 		}
@@ -371,13 +361,13 @@ func getDefaultPulseAudioSource() string {
 			sourceName := fields[1]
 			// Exclude monitors (virtual capture of speaker output) and echocancel devices
 			if !strings.Contains(sourceName, "monitor") && !strings.Contains(sourceName, "echocancel") {
-				log.Printf("✅ Found hardware source: %s", sourceName)
+				log.Printf("Found hardware source: %s", sourceName)
 				return sourceName
 			}
 		}
 	}
 	
-	log.Println("⚠️ No hardware source found, using 'default'")
+	log.Println("No hardware source found, using 'default'")
 	return "default"
 }
 
@@ -406,7 +396,7 @@ func getDefaultPulseAudioSink() string {
 	cmd = exec.Command("pactl", "list", "short", "sinks")
 	output, err = cmd.Output()
 	if err != nil {
-		log.Println("⚠️ Failed to query PulseAudio sinks, using 'default'")
+		log.Println("Failed to query PulseAudio sinks, using 'default'")
 		return "default"
 	}
 	
@@ -422,7 +412,7 @@ func getDefaultPulseAudioSink() string {
 			sinkName := fields[1]
 			// Prioritize USB devices over built-in
 			if strings.Contains(sinkName, "usb") && !strings.Contains(sinkName, "echocancel") {
-				log.Printf("✅ Found USB hardware sink (preferred): %s", sinkName)
+				log.Printf("Found USB hardware sink (preferred): %s", sinkName)
 				return sinkName
 			}
 		}
@@ -438,17 +428,17 @@ func getDefaultPulseAudioSink() string {
 			sinkName := fields[1]
 			// Exclude echocancel devices
 			if !strings.Contains(sinkName, "echocancel") {
-				log.Printf("✅ Found hardware sink: %s", sinkName)
+				log.Printf("Found hardware sink: %s", sinkName)
 				return sinkName
 			}
 		}
 	}
 	
-	log.Println("⚠️ No hardware sink found, using 'default'")
+	log.Println("No hardware sink found, using 'default'")
 	return "default"
 }
 
-// getPulseAudioSinks gets available PulseAudio output sinks - vnextthongnv
+// getPulseAudioSinks gets available PulseAudio output sinks
 func getPulseAudioSinks() []string {
 	cmd := exec.Command("pactl", "list", "short", "sinks")
 	output, err := cmd.Output()
@@ -473,7 +463,7 @@ func getPulseAudioSinks() []string {
 	return sinks
 }
 
-// UnmuteMicrophone unmutes the microphone for audio capture - vnextthongnv
+// UnmuteMicrophone unmutes the microphone for audio capture
 func (a *AudioDeviceInfo) UnmuteMicrophone() error {
 	if a.UsePulseAudio {
 		// Unmute PulseAudio source
@@ -495,10 +485,10 @@ func (a *AudioDeviceInfo) UnmuteMicrophone() error {
 	return nil
 }
 
-// SetMicrophoneVolume sets microphone volume for AEC balance - vnextthongnv
+// SetMicrophoneVolume sets microphone volume for AEC balance
 func (a *AudioDeviceInfo) SetMicrophoneVolume() error {
 	if a.UsePulseAudio {
-		// Set PulseAudio source volume to 15% (VERY AGGRESSIVE for stubborn echo!)
+		// Set PulseAudio source volume to 50% (VERY AGGRESSIVE for stubborn echo!)
 		// EXTREMELY LOW hardware sensitivity prevents mic from picking up speaker
 		// Software boost (3.5x in audio_capture.go) compensates AFTER AEC processing
 		// Strategy: Minimize acoustic pickup → AEC cancels → Amplify clean signal
@@ -507,21 +497,21 @@ func (a *AudioDeviceInfo) SetMicrophoneVolume() error {
 			log.Printf("Warning: Failed to set PulseAudio microphone volume: %v", err)
 			return err
 		}
-		log.Printf("✅ Microphone hardware: 15%% (EXTREMELY low - aggressive echo prevention!), software: 3.5x boost")
-		log.Printf("📌 Strategy: Minimize acoustic echo → Aggressive AEC → Amplify clean voice")
+		log.Printf("Microphone hardware: 50%% (EXTREMELY low - aggressive echo prevention!), software: 3.5x boost")
+		log.Printf("Strategy: Minimize acoustic echo → Aggressive AEC → Amplify clean voice")
 	} else {
-		// Set ALSA capture volume to 15%
+		// Set ALSA capture volume to 50%
 		cmd := exec.Command("amixer", "set", "Capture", "50%")
 		if err := cmd.Run(); err != nil {
 			log.Printf("Warning: Failed to set ALSA microphone volume: %v", err)
 			return err
 		}
-		log.Printf("Audio: Set ALSA microphone volume to 15%% (extremely low for aggressive AEC)")
+		log.Printf("Audio: Set ALSA microphone volume to 50%% (extremely low for aggressive AEC)")
 	}
 	return nil
 }
 
-// SetSpeakerVolume sets speaker volume for clear playback - vnextthongnv
+// SetSpeakerVolume sets speaker volume for clear playback
 func (a *AudioDeviceInfo) SetSpeakerVolume() error {
 	if a.UsePulseAudio {
 		// Set PulseAudio sink volume to 150% (high volume for clarity)
@@ -532,8 +522,8 @@ func (a *AudioDeviceInfo) SetSpeakerVolume() error {
 			log.Printf("Warning: Failed to set PulseAudio speaker volume: %v", err)
 			return err
 		}
-		log.Printf("✅ Speaker hardware: 150%% (high volume for clarity), software: 6x boost + EQ")
-		log.Printf("📌 Balance: Mic 30%% (quiet) vs Speaker 150%% (loud) = No echo feedback")
+		log.Printf("Speaker hardware: 150%% (high volume for clarity), software: 6x boost + EQ")
+		log.Printf("Balance: Mic 30%% (quiet) vs Speaker 150%% (loud) = No echo feedback")
 	} else {
 		// Set ALSA playback volume to 100% (ALSA max)
 		cmd := exec.Command("amixer", "set", "Master", "100%")

@@ -14,7 +14,7 @@ import (
 	opus "gopkg.in/hraban/opus.v2"
 )
 
-// AudioCapture captures audio from microphone and sends to WebRTC track - vnextthongnv
+// AudioCapture captures audio from microphone and sends to WebRTC track
 type AudioCapture struct {
 	track        *webrtc.TrackLocalStaticSample
 	cmd          *exec.Cmd
@@ -22,16 +22,15 @@ type AudioCapture struct {
 	running      bool
 	deviceInfo   *AudioDeviceInfo
 	mu           sync.Mutex
-	opusEncoder  *opus.Encoder // Opus encoder for PCM→Opus conversion (Phase 4 - Option 5)
+	opusEncoder  *opus.Encoder // Opus encoder for PCM -> Opus conversion
 }
 
-// NewAudioCapture creates audio capture instance - vnextthongnv
+// NewAudioCapture creates audio capture instance
 func NewAudioCapture(track *webrtc.TrackLocalStaticSample) *AudioCapture {
 	deviceInfo := DetectAudioDevices()
 	
-	// Initialize Opus encoder for PCM→Opus conversion (Phase 4 - Option 5)
-	// 48000 Hz, 2 channels (stereo), VoIP application (optimized for real-time speech)
-	// NOTE: FFmpeg resamples 44.1kHz (AEC) → 48kHz (Opus) - resample AFTER AEC is correct
+	// Initialize Opus encoder for PCM -> Opus conversion
+	// 48000 Hz, 2 channels, VoIP application
 	encoder, err := opus.NewEncoder(48000, 2, opus.AppVoIP)
 	if err != nil {
 		log.Printf("ERROR: Failed to create Opus encoder: %v", err)
@@ -52,7 +51,7 @@ func NewAudioCapture(track *webrtc.TrackLocalStaticSample) *AudioCapture {
 	}
 }
 
-// Start begins audio capture - vnextthongnv
+// Start begins audio capture
 func (a *AudioCapture) Start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -61,7 +60,7 @@ func (a *AudioCapture) Start() error {
 		return nil
 	}
 
-	// Unmute microphone and set volume BEFORE starting capture - vnextthongnv
+	// Unmute microphone and set volume BEFORE starting capture
 	log.Println("Audio: Preparing microphone for capture...")
 	if err := a.deviceInfo.UnmuteMicrophone(); err != nil {
 		log.Printf("Warning: Microphone unmute failed, continuing anyway: %v", err)
@@ -70,20 +69,15 @@ func (a *AudioCapture) Start() error {
 		log.Printf("Warning: Microphone volume setting failed, continuing anyway: %v", err)
 	}
 
-	// Start FFmpeg process directly - simplified logic - vnextthongnv
+	// Start FFmpeg process directly - simplified logic
 	var args []string
 	
 	if a.deviceInfo.UsePulseAudio {
 		// PulseAudio - AEC-optimized: Low hardware sensitivity, high software boost
-		// PulseAudio handles device format (mono→stereo, sample rate) conversion automatically
+		// PulseAudio handles device format (mono -> stereo, sample rate) conversion automatically
 		args = []string{
 			"-f", "pulse",
 			"-i", a.deviceInfo.InputDevice,
-			// AEC-optimized processing chain:
-			// Hardware: 30% (low acoustic pickup) → AEC works → Software: 3.5x boost
-			// Effective volume: 30% × 3.5 = 105% (slightly more sensitive than default)
-			// Strategy: Reduce echo pickup BEFORE AEC, amplify clean signal AFTER AEC
-			// Convert device native (mono/stereo) → stereo for Opus
 			"-af", "highpass=f=80,lowpass=f=8000,volume=3.5,aformat=channel_layouts=stereo",
 			"-f", "s16le",        // Signed 16-bit little-endian PCM
 			"-ar", "48000",       // Resample device rate → 48kHz (Opus) - PulseAudio handles resampling
@@ -96,7 +90,6 @@ func (a *AudioCapture) Start() error {
 		args = []string{
 			"-f", "alsa",
 			"-i", a.deviceInfo.InputDevice,
-			// ALSA needs higher software boost (hardware limited to 100%)
 			"-af", "highpass=f=80,lowpass=f=8000,acompressor=threshold=-20dB:ratio=3:attack=50:release=500,volume=4.0",
 			"-f", "s16le",        // Signed 16-bit little-endian PCM
 			"-ar", "48000",       // 48kHz (Opus requirement, no AEC in ALSA)
@@ -114,7 +107,7 @@ func (a *AudioCapture) Start() error {
 		return err
 	}
 
-	// Capture stderr for debugging - vnextthongnv
+	// Capture stderr for debugging
 	stderr, err := a.cmd.StderrPipe()
 	if err != nil {
 		return err
@@ -133,7 +126,7 @@ func (a *AudioCapture) Start() error {
 	}()
 
 	if err := a.cmd.Start(); err != nil {
-		log.Printf("ERROR: Failed to start audio capture: %v", err) // vnextthongnv
+		log.Printf("ERROR: Failed to start audio capture: %v", err) //
 		return err
 	}
 
@@ -142,12 +135,12 @@ func (a *AudioCapture) Start() error {
 	audioSystem := "PulseAudio"
 	aecInfo := ""
 	if a.deviceInfo.UsePulseAudio && a.deviceInfo.InputDevice == "echocancel_source" {
-		aecInfo = " [AEC 44.1kHz → FFmpeg resample 48kHz]"
+		aecInfo = " [AEC 44.1kHz -> FFmpeg resample 48kHz]"
 	}
 	if !a.deviceInfo.UsePulseAudio {
 		audioSystem = "ALSA"
 	}
-	log.Printf("Audio capture started (%s%s, PCM 48kHz stereo → Opus)", audioSystem, aecInfo)
+	log.Printf("Audio capture started (%s%s, PCM 48kHz stereo -> Opus)", audioSystem, aecInfo)
 
 	// Start goroutine to read and send audio
 	go a.captureLoop()
@@ -155,14 +148,9 @@ func (a *AudioCapture) Start() error {
 	return nil
 }
 
-// Restart mechanism removed - was causing infinite loop with closed pipes
-// If audio capture fails, the loop exits cleanly and requires manual restart
-
-// OGG parser removed - Phase 4 Option 5 uses direct PCM→Opus encoding
-
-// captureLoop reads PCM audio, encodes to Opus, and writes to WebRTC track - vnextthongnv
+// captureLoop reads PCM audio, encodes to Opus, and writes to WebRTC track
 func (a *AudioCapture) captureLoop() {
-	log.Println("Audio captureLoop started - Phase 4 Option 5: PCM → Opus encoding")
+	log.Println("Audio captureLoop started: PCM -> Opus encoding")
 	
 	// PCM parameters for 48kHz stereo, 20ms frames
 	// 48000 Hz × 2 channels × 2 bytes/sample × 0.020 sec = 3840 bytes per frame
@@ -226,18 +214,10 @@ func (a *AudioCapture) captureLoop() {
 		}
 		
 		packetCount++
-		
-		// Log every 50 packets for diagnostics
-		if packetCount % 50 == 0 {
-			elapsed := time.Since(startTime).Seconds()
-			packetsPerSec := float64(packetCount) / elapsed
-			log.Printf("DEBUG: PCM→Opus - Packets: %d, PCM: %d bytes, Opus: %d bytes, Rate: %.1f pkt/s", 
-				packetCount, pcmFrameSize, opusLen, packetsPerSec)
-		}
-		
+
 		// Log first successful encode
 		if packetCount == 1 {
-			log.Printf("PCM→Opus: First frame encoded successfully (PCM: %d → Opus: %d bytes)", 
+			log.Printf("PCM -> Opus: First frame encoded successfully (PCM: %d -> Opus: %d bytes)", 
 				pcmFrameSize, opusLen)
 		}
 		
@@ -258,10 +238,10 @@ func (a *AudioCapture) captureLoop() {
 		}
 	}
 	
-	log.Println("Audio capture loop stopped") // vnextthongnv
+	log.Println("Audio capture loop stopped")
 }
 
-// Stop ends audio capture - vnextthongnv
+// Stop ends audio capture
 func (a *AudioCapture) Stop() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -281,6 +261,6 @@ func (a *AudioCapture) Stop() {
 		a.stdout.Close()
 	}
 
-	log.Println("Audio capture stopped") // vnextthongnv
+	log.Println("Audio capture stopped")
 }
 
