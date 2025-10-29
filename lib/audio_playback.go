@@ -182,10 +182,10 @@ func (a *AudioPlayback) StartDecoder() error {
 			"-i", "pipe:0",       // Read from stdin
 			// Audio processing for clarity and volume:
 			// 1. Convert stereo → device channels (PulseAudio handles this)
-			// 2. equalizer: boost mid-range (voice frequencies 300-3000Hz)
+			// 2. highpass/lowpass: focus on voice frequencies (80Hz-8000Hz)
 			// 3. volume: 6x boost (safe with low mic sensitivity)
 			// 4. compressor: prevent clipping from high volume
-			"-af", "aformat=sample_fmts=s16:channel_layouts=stereo,equalizer=f=1000:width_type=h:width=2000:g=3,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
+			"-af", "aformat=sample_fmts=s16:channel_layouts=stereo,highpass=f=80,lowpass=f=8000,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
 			"-f", "pulse",        // Output to PulseAudio (handles device conversion)
 			a.deviceInfo.OutputDevice,
 		}
@@ -196,7 +196,7 @@ func (a *AudioPlayback) StartDecoder() error {
 			"-ar", "48000",       // 48kHz (Opus requirement, no AEC in ALSA)
 			"-ac", "2",           // Stereo
 			"-i", "pipe:0",       // Read from stdin
-			"-af", "equalizer=f=1000:width_type=h:width=2000:g=3,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
+			"-af", "highpass=f=80,lowpass=f=8000,volume=6.0,acompressor=threshold=-10dB:ratio=4:attack=5:release=50",
 			"-f", "alsa",         // Output to ALSA
 			a.deviceInfo.OutputDevice,
 		}
