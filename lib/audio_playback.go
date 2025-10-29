@@ -233,7 +233,9 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 	packetCount := 0
 	emptyPayloadCount := 0
 	
-	log.Println("✓ Decoder thread started")
+	log.Println("✓ Decoder thread started, waiting for RTP packets from browser...")
+	log.Printf("   Track info: Kind=%s, Codec=%s, SSRC=%d", 
+		track.Kind().String(), track.Codec().MimeType, track.SSRC())
 	
 	for a.running {
 		// Read RTP packet with Opus payload
@@ -246,6 +248,11 @@ func (a *AudioPlayback) DecodeLoop(track *webrtc.TrackRemote) {
 		}
 
 		packetCount++
+		
+		// Log first RTP packet arrival
+		if packetCount == 1 {
+			log.Printf("🎉 FIRST RTP packet received from browser! Starting audio decode...")
+		}
 		
 		// Check payload size - vnextthongnv
 		if len(rtp.Payload) == 0 {
@@ -371,15 +378,21 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 // PlaybackLoop starts both decode and playback threads - vnextthongnv
 // Exported so it can be called from webrtc.go OnTrack handler
 func (a *AudioPlayback) PlaybackLoop(track *webrtc.TrackRemote) {
-	log.Println("=== Starting jitter-buffered audio playback ===")
+	log.Println("=== Starting jitter-buffered audio playback (browser mic → VM speaker) ===")
+	log.Printf("    Remote track: Kind=%s, Codec=%s, SSRC=%d, ID=%s", 
+		track.Kind().String(), track.Codec().MimeType, track.SSRC(), track.ID())
 	
 	// Start decoder thread (reads RTP → decodes → enqueues)
 	a.wg.Add(1)
 	go a.DecodeLoop(track)
+	log.Println("    ✓ Decoder thread launched")
 	
 	// Start playback thread (dequeues → writes FFmpeg at 20ms rate)
 	a.wg.Add(1)
 	go a.TimedPlaybackLoop()
+	log.Println("    ✓ Playback thread launched")
+	
+	log.Println("=== Both audio playback threads running, waiting for browser audio... ===")
 	
 	// Wait for both threads to complete
 	a.wg.Wait()

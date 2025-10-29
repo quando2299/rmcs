@@ -158,7 +158,7 @@ func verifyAECStatus() {
 				format := fields[3]
 				channels := fields[4]
 				rate := fields[5]
-				log.Printf("AEC Source: %s (format: %s, %s ch, rate: %s)", q
+				log.Printf("AEC Source: %s (format: %s, %s ch, rate: %s)",
 					fields[1], format, channels, rate)
 				
 				// Info about format (not a warning - this is expected for WebRTC AEC)
@@ -439,16 +439,16 @@ func (a *AudioDeviceInfo) SetMicrophoneVolume() error {
 		// EXTREMELY LOW hardware sensitivity prevents mic from picking up speaker
 		// Software boost (3.5x in audio_capture.go) compensates AFTER AEC processing
 		// Strategy: Minimize acoustic pickup → AEC cancels → Amplify clean signal
-		cmd := exec.Command("pactl", "set-source-volume", a.InputDevice, "15%")
+		cmd := exec.Command("pactl", "set-source-volume", a.InputDevice, "50%")
 		if err := cmd.Run(); err != nil {
 			log.Printf("Warning: Failed to set PulseAudio microphone volume: %v", err)
 			return err
 		}
-		log.Printf(" Microphone hardware: 15%% (EXTREMELY low - aggressive echo prevention!), software: 3.5x boost")
+		log.Printf(" Microphone hardware: 50%% (EXTREMELY low - aggressive echo prevention!), software: 3.5x boost")
 		log.Printf("Strategy: Minimize acoustic echo → Aggressive AEC → Amplify clean voice")
 	} else {
 		// Set ALSA capture volume to 15%
-		cmd := exec.Command("amixer", "set", "Capture", "15%")
+		cmd := exec.Command("amixer", "set", "Capture", "50%")
 		if err := cmd.Run(); err != nil {
 			log.Printf("Warning: Failed to set ALSA microphone volume: %v", err)
 			return err

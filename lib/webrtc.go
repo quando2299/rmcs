@@ -165,6 +165,24 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 	}
 	log.Printf("[%s] Added video and audio tracks to peer connection", peerID) // vnextthongnv
 
+	// Set up OnTrack handler to receive remote audio from browser - vnextthongnv
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("[%s] 🎵 OnTrack fired: kind=%s, codec=%s, id=%s", 
+			peerID, track.Kind().String(), track.Codec().MimeType, track.ID())
+		
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			log.Printf("[%s] ✓ Remote AUDIO track received from browser (browser mic → VM speaker)", peerID)
+			log.Printf("[%s] Audio codec: %s, PayloadType: %d, ClockRate: %d", 
+				peerID, track.Codec().MimeType, track.PayloadType(), track.Codec().ClockRate)
+			
+			// Start the playback loop to decode and play the audio
+			go w.audioPlayback.PlaybackLoop(track)
+			log.Printf("[%s] ✓ Audio playback loop started for remote track", peerID)
+		} else {
+			log.Printf("[%s] Ignoring non-audio track: %s", peerID, track.Kind().String())
+		}
+	})
+
 	// Set up connection state handlers
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("[%s] ICE connection state changed: %s", peerID, state.String())
