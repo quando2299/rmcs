@@ -23,6 +23,7 @@ type ROSSubscriber struct {
 	isRunning    bool
 	stopChan     chan bool
 	mu           sync.Mutex
+	trackID      string // Unique identifier for this subscriber
 	topicName    string
 	rosMasterURI string
 
@@ -65,7 +66,7 @@ type ROSSubscriber struct {
 	framesDropped       int
 }
 
-func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string) *ROSSubscriber {
+func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string, trackID string) *ROSSubscriber {
 	fps := uint32(30)
 
 	// Map camera index to ROS topic name
@@ -73,6 +74,7 @@ func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, ros
 
 	return &ROSSubscriber{
 		track:               track,
+		trackID:             trackID,
 		topicName:           topicName,
 		rosMasterURI:        rosMasterURI,
 		stopChan:            make(chan bool),
@@ -155,9 +157,10 @@ func (r *ROSSubscriber) Start() error {
 		return nil
 	}
 
-	// Create ROS node
+	// Create ROS node with unique name per track to avoid conflicts
+	nodeName := fmt.Sprintf("rmcs_subscriber_%s", r.trackID)
 	node, err := goroslib.NewNode(goroslib.NodeConf{
-		Name:          "rmcs_subscriber",
+		Name:          nodeName,
 		MasterAddress: r.rosMasterURI,
 	})
 	if err != nil {
@@ -223,11 +226,10 @@ func (r *ROSSubscriber) initGStreamer() error {
 		return fmt.Errorf("cannot start GStreamer with zero dimensions")
 	}
 
-	log.Printf("Starting GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
+	// Try NVIDIA hardware encoder first (for Jetson)
+	log.Printf("Attempting to start GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
 
-	// GStreamer pipeline using NVIDIA hardware encoder
-	// Use shell to properly handle the pipeline syntax
-	pipeline := fmt.Sprintf(
+	nvidiaPipeline := fmt.Sprintf(
 		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
@@ -236,7 +238,42 @@ func (r *ROSSubscriber) initGStreamer() error {
 		r.width, r.height, r.fps, r.fps,
 	)
 
-	r.cmd = exec.Command("/bin/sh", "-c", pipeline)
+	// Check if NVIDIA encoder is available
+	var pipeline string
+	checkCmd := exec.Command("gst-inspect-1.0", "nvv4l2h264enc")
+	if err := checkCmd.Run(); err == nil {
+		// NVIDIA encoder available - use it
+		log.Printf("NVIDIA hardware encoder detected, using nvv4l2h264enc")
+		pipeline = nvidiaPipeline
+		r.cmd = exec.Command("/bin/sh", "-c", nvidiaPipeline)
+	} else {
+		// NVIDIA encoder not available - fall back to software encoder
+		log.Printf("NVIDIA encoder not available (running on Mac/x86?), falling back to x264enc software encoder")
+
+		// x264enc requires even dimensions - pad if necessary
+		// Round width and height to next even number
+		evenWidth := r.width
+		if evenWidth%2 != 0 {
+			evenWidth++
+		}
+		evenHeight := r.height
+		if evenHeight%2 != 0 {
+			evenHeight++
+		}
+
+		log.Printf("Padding dimensions from %dx%d to %dx%d for x264enc", r.width, r.height, evenWidth, evenHeight)
+
+		// Use videoscale to pad to even dimensions, then encode with x264
+		softwarePipeline := fmt.Sprintf(
+			"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
+				"videoconvert ! videoscale ! video/x-raw,width=%d,height=%d,format=I420 ! "+
+				"x264enc bitrate=2000 speed-preset=ultrafast tune=zerolatency key-int-max=%d ! "+
+				"h264parse config-interval=-1 ! fdsink",
+			r.width, r.height, r.fps, evenWidth, evenHeight, r.fps,
+		)
+		pipeline = softwarePipeline
+		r.cmd = exec.Command("/bin/sh", "-c", softwarePipeline)
+	}
 
 	// Log the exact command being executed for debugging
 	log.Printf("GStreamer command: %s", pipeline)
@@ -266,16 +303,33 @@ func (r *ROSSubscriber) initGStreamer() error {
 		return fmt.Errorf("failed to start GStreamer: %v", err)
 	}
 
-	// Log GStreamer stderr in background (errors and warnings only)
+	// Log ALL GStreamer stderr output to help debug crashes
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Only log errors and warnings
-			if len(line) > 0 && (line[0] == 'E' || line[0] == 'W') {
-				log.Printf("[GStreamer ROS] %s", line)
+			if len(line) > 0 {
+				log.Printf("[GStreamer stderr track=%s] %s", r.trackID, line)
 			}
 		}
+	}()
+
+	// Monitor GStreamer process - detect crashes
+	go func() {
+		err := r.cmd.Wait()
+		if err != nil {
+			log.Printf("GStreamer process CRASHED for track %s: %v", r.trackID, err)
+			log.Printf("HINT: If error mentions 'nvv4l2h264enc' or 'nvvidconv', you MUST run on Jetson device with NVIDIA GPU")
+		} else {
+			log.Printf("GStreamer process exited normally for track %s", r.trackID)
+		}
+
+		// Mark GStreamer as stopped
+		r.mu.Lock()
+		r.gstStdin = nil
+		r.gstStdout = nil
+		r.cmd = nil
+		r.mu.Unlock()
 	}()
 
 	// Reset benchmark counters and frame limiting for new encoder instance
@@ -290,7 +344,7 @@ func (r *ROSSubscriber) initGStreamer() error {
 	go r.readH264Stream(stdout)
 
 	r.dimensionInitialized = true
-	log.Printf("GStreamer NVIDIA hardware encoder started successfully for %dx%d @ %d fps", r.width, r.height, r.fps)
+	log.Printf("GStreamer H.264 encoder started successfully for %dx%d @ %d fps", r.width, r.height, r.fps)
 	return nil
 }
 
@@ -429,20 +483,25 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		return
 	}
 
-	// Get GStreamer stdin
+	// Get GStreamer stdin and check if process is still running
 	r.mu.Lock()
 	gstStdin := r.gstStdin
+	cmd := r.cmd
+	stillRunning := r.isRunning
 	r.mu.Unlock()
 
-	if gstStdin != nil {
+	// Check if GStreamer process has crashed
+	if cmd != nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		// Process has exited - stop trying to write
+		return
+	}
+
+	if gstStdin != nil && stillRunning {
 		n, err := gstStdin.Write(msg.Data)
 		if err != nil {
-			// Only log if still running (avoid spam during shutdown)
-			r.mu.Lock()
-			stillRunning := r.isRunning
-			r.mu.Unlock()
-			if stillRunning {
-				log.Printf("ERROR: Failed writing to GStreamer stdin: %v", err)
+			// Log error only once by checking if process is still alive
+			if cmd != nil && cmd.Process != nil {
+				log.Printf("ERROR: Failed writing to GStreamer stdin for track %s: %v (GStreamer may have crashed)", r.trackID, err)
 			}
 			return
 		}

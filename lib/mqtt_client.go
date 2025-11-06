@@ -41,37 +41,99 @@ func (m *MQTTClient) Connect() error {
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
 		log.Println("Connected to MQTT Broker successfully!")
 
-		// Subscribe to camera topic to handle camera switching
+		// Subscribe to per-peer camera topic: {baseTopic}/{peerId}/camera
+		perPeerCameraTopic := fmt.Sprintf("%s/+/camera", baseTopic)
+		perPeerCameraToken := client.Subscribe(perPeerCameraTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
+			log.Printf("Per-peer camera switch request received on topic %s: %s", msg.Topic(), string(msg.Payload()))
+
+			// Extract peer ID from topic: baseTopic/peerId/camera
+			topicStr := string(msg.Topic())
+			baseLen := len(baseTopic) + 1 // +1 for the /
+			if len(topicStr) > baseLen {
+				remainingTopic := topicStr[baseLen:]
+				// Find the next /
+				for i, ch := range remainingTopic {
+					if ch == '/' {
+						peerID := remainingTopic[:i]
+						log.Printf("Extracted peer ID for camera switch: %s", peerID)
+
+						// Parse camera number from message
+						var cameraNumber int
+						_, err := fmt.Sscanf(string(msg.Payload()), "%d", &cameraNumber)
+						if err != nil {
+							log.Printf("MQTT_ERROR: Failed to parse camera number from message '%s': %v", string(msg.Payload()), err)
+							return
+						}
+						log.Printf("Parsed camera number: %d for peer: %s", cameraNumber, peerID)
+
+						// Switch camera for specific peer
+						if err := m.webrtcManager.SwitchCameraForPeer(peerID, cameraNumber); err != nil {
+							log.Printf("MQTT_ERROR: Camera switch failed for peer %s, camera %d: %v", peerID, cameraNumber, err)
+						} else {
+							log.Printf("Successfully switched camera to %d for peer %s", cameraNumber, peerID)
+						}
+						break
+					}
+				}
+			}
+		})
+
+		if perPeerCameraToken.Wait() && perPeerCameraToken.Error() != nil {
+			log.Printf("Failed to subscribe to %s: %v", perPeerCameraTopic, perPeerCameraToken.Error())
+		} else {
+			log.Printf("Subscribed to per-peer camera topic: %s", perPeerCameraTopic)
+		}
+
+		// Subscribe to global camera topic - handles JSON payload with peer_id
 		cameraTopic := fmt.Sprintf("%s/camera", thingName)
 		cameraToken := client.Subscribe(cameraTopic, 0, func(client mqtt.Client, msg mqtt.Message) {
 			log.Printf("Camera switch request received on topic %s: %s", msg.Topic(), string(msg.Payload()))
 
-			// Parse camera number from message
-			var cameraNumber int
-			_, err := fmt.Sscanf(string(msg.Payload()), "%d", &cameraNumber)
-			if err != nil {
-				log.Printf("MQTT_ERROR: Failed to parse camera number from message '%s': %v", string(msg.Payload()), err)
-				return
+			payload := string(msg.Payload())
+
+			// Try to parse as JSON first: {"peer_id": "...", "camera": ...}
+			var cameraRequest struct {
+				PeerID string `json:"peer_id"`
+				Camera int    `json:"camera"`
 			}
 
-			log.Printf("Parsed camera number: %d", cameraNumber)
+			err := json.Unmarshal([]byte(payload), &cameraRequest)
+			if err == nil && cameraRequest.PeerID != "" {
+				// JSON format with peer_id - per-peer camera switch
+				log.Printf("JSON camera switch: peer=%s, camera=%d", cameraRequest.PeerID, cameraRequest.Camera)
 
-			// Switch to requested camera
-			if err := m.webrtcManager.SwitchCamera(cameraNumber); err != nil {
-				log.Printf("MQTT_ERROR: Camera switch failed for camera %d: %v", cameraNumber, err)
-				// Publish error status back to MQTT if needed
-				errorTopic := fmt.Sprintf("%s/camera/error", thingName)
-				errorMsg := fmt.Sprintf("Failed to switch to camera %d: %v", cameraNumber, err)
-				client.Publish(errorTopic, 0, false, errorMsg)
+				if err := m.webrtcManager.SwitchCameraForPeer(cameraRequest.PeerID, cameraRequest.Camera); err != nil {
+					log.Printf("MQTT_ERROR: Camera switch failed for peer %s, camera %d: %v", cameraRequest.PeerID, cameraRequest.Camera, err)
+				} else {
+					log.Printf("Successfully switched camera to %d for peer %s", cameraRequest.Camera, cameraRequest.PeerID)
+				}
 			} else {
-				log.Printf("Successfully switched to camera %d", cameraNumber)
+				// Fallback: Try to parse as plain number (legacy behavior)
+				var cameraNumber int
+				_, err := fmt.Sscanf(payload, "%d", &cameraNumber)
+				if err != nil {
+					log.Printf("MQTT_ERROR: Failed to parse camera message '%s': %v", payload, err)
+					return
+				}
+
+				log.Printf("Legacy camera switch (global): camera=%d", cameraNumber)
+
+				// Switch to requested camera globally (legacy behavior)
+				if err := m.webrtcManager.SwitchCamera(cameraNumber); err != nil {
+					log.Printf("MQTT_ERROR: Camera switch failed for camera %d: %v", cameraNumber, err)
+					errorTopic := fmt.Sprintf("%s/camera/error", thingName)
+					errorMsg := fmt.Sprintf("Failed to switch to camera %d: %v", cameraNumber, err)
+					client.Publish(errorTopic, 0, false, errorMsg)
+				} else {
+					log.Printf("Successfully switched to camera %d (global)", cameraNumber)
+				}
 			}
 		})
 
 		if cameraToken.Wait() && cameraToken.Error() != nil {
 			log.Printf("Failed to subscribe to %s: %v", cameraTopic, cameraToken.Error())
 		} else {
-			log.Printf("Subscribed to camera topic: %s", cameraTopic)
+			log.Printf("Subscribed to legacy camera topic: %s", cameraTopic)
 		}
 
 		// Subscribe to disconnect-client topic

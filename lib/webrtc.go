@@ -10,12 +10,21 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// TrackInfo holds information about a video track and its associated ROS subscriber
+type TrackInfo struct {
+	track         *webrtc.TrackLocalStaticSample
+	rosSubscriber *ROSSubscriber
+	cameraNumber  int
+}
+
 type WebRTCManager struct {
 	peerConnections map[string]*webrtc.PeerConnection
-	videoTrack      *webrtc.TrackLocalStaticSample
+	tracks          map[string]*TrackInfo // trackID -> TrackInfo (e.g., "left", "right")
+	peerToTrack     map[string]string     // peerID -> trackID
+	videoTrack      *webrtc.TrackLocalStaticSample // Deprecated: kept for backward compatibility
 	videoStreamer   *VideoStreamer
 	cameraCapture   *CameraCapture
-	rosSubscriber   *ROSSubscriber
+	rosSubscriber   *ROSSubscriber // Deprecated: kept for backward compatibility
 	useROSMode      bool
 	useCameraMode   bool
 	rosMasterURI    string
@@ -28,6 +37,16 @@ type ICECandidateMessage struct {
 	Candidate     string `json:"candidate"`
 	SDPMid        string `json:"sdpMid"`
 	SDPMLineIndex uint16 `json:"sdpMLineIndex"`
+}
+
+// extractTrackID extracts the track identifier from peer ID
+// Each unique peerID gets its own track for multi-camera support
+// Returns: the peerID itself as trackID (one track per peer)
+func extractTrackID(peerID string) string {
+	// Use peerID directly as trackID
+	// This allows unlimited simultaneous camera streams
+	// Example: peerID "1762312010698752" → trackID "1762312010698752"
+	return peerID
 }
 
 func NewWebRTCManager() (*WebRTCManager, error) {
@@ -76,8 +95,8 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	// Start with camera 1
 	cameraIndex := 1
 
-	// Create ROS subscriber
-	rosSubscriber = NewROSSubscriber(videoTrack, cameraIndex, rosMasterURI)
+	// Create ROS subscriber (legacy single-track mode)
+	rosSubscriber = NewROSSubscriber(videoTrack, cameraIndex, rosMasterURI, "legacy")
 
 	// Override topic name if custom topic is specified for camera 1
 	if customTopic, exists := customTopics[1]; exists {
@@ -89,10 +108,12 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 
 	return &WebRTCManager{
 		peerConnections: make(map[string]*webrtc.PeerConnection),
-		videoTrack:      videoTrack,
-		videoStreamer:   nil, // No file-based streaming
-		cameraCapture:   nil, // No direct camera capture
-		rosSubscriber:   rosSubscriber,
+		tracks:          make(map[string]*TrackInfo),
+		peerToTrack:     make(map[string]string),
+		videoTrack:      videoTrack,       // Deprecated: for backward compatibility
+		rosSubscriber:   rosSubscriber,    // Deprecated: for backward compatibility
+		videoStreamer:   nil,              // No file-based streaming
+		cameraCapture:   nil,              // No direct camera capture
 		useROSMode:      useROSMode,
 		useCameraMode:   false,
 		rosMasterURI:    rosMasterURI,
@@ -100,9 +121,72 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	}, nil
 }
 
+// getOrCreateTrack gets an existing track or creates a new one for the given trackID
+// Caller must hold w.mu lock
+func (w *WebRTCManager) getOrCreateTrack(trackID string) (*TrackInfo, error) {
+	// Check if track already exists
+	if trackInfo, exists := w.tracks[trackID]; exists {
+		return trackInfo, nil
+	}
+
+	log.Printf("Creating new track for trackID: %s", trackID)
+
+	// Create new video track
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeH264,
+			ClockRate:   90000,
+			Channels:    0,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f",
+		},
+		fmt.Sprintf("video-%s", trackID),
+		fmt.Sprintf("stream-%s", trackID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create video track: %v", err)
+	}
+
+	// Create ROS subscriber for this track (start with camera 1)
+	var rosSubscriber *ROSSubscriber
+	if w.useROSMode {
+		cameraNumber := 1 // Default camera
+		rosSubscriber = NewROSSubscriber(videoTrack, cameraNumber, w.rosMasterURI, trackID)
+
+		// Override topic if custom topic is specified
+		if customTopic, exists := w.customTopics[cameraNumber]; exists {
+			rosSubscriber.topicName = customTopic
+			log.Printf("Track %s: using custom topic for camera %d: %s", trackID, cameraNumber, customTopic)
+		}
+	}
+
+	trackInfo := &TrackInfo{
+		track:         videoTrack,
+		rosSubscriber: rosSubscriber,
+		cameraNumber:  1, // Start with camera 1
+	}
+
+	w.tracks[trackID] = trackInfo
+	log.Printf("Created new track: %s with camera %d", trackID, trackInfo.cameraNumber)
+
+	return trackInfo, nil
+}
+
 func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	// Extract track ID from peer ID
+	trackID := extractTrackID(peerID)
+	log.Printf("Processing offer for peer %s, trackID: %s", peerID, trackID)
+
+	// Get or create track for this trackID
+	trackInfo, err := w.getOrCreateTrack(trackID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get/create track: %v", err)
+	}
+
+	// Map peer to track
+	w.peerToTrack[peerID] = trackID
 
 	// Close existing connection if any
 	if existingPC, exists := w.peerConnections[peerID]; exists {
@@ -124,12 +208,13 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 		return "", err
 	}
 
-	// Add the video track to the new peer connection
-	_, err = peerConnection.AddTrack(w.videoTrack)
+	// Add the specific video track for this peer
+	_, err = peerConnection.AddTrack(trackInfo.track)
 	if err != nil {
 		peerConnection.Close()
 		return "", err
 	}
+	log.Printf("Added track %s to peer %s", trackID, peerID)
 
 	// Set up connection state handlers
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
@@ -142,12 +227,17 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			log.Printf("[%s] WebRTC connected, starting video stream", peerID)
-			if w.useROSMode && w.rosSubscriber != nil {
-				// Start ROS subscriber on first connection
-				if err := w.rosSubscriber.Start(); err != nil {
-					log.Printf("ERROR: Failed to start ROS subscriber: %v", err)
+			w.mu.Lock()
+			trackID := w.peerToTrack[peerID]
+			trackInfo, exists := w.tracks[trackID]
+			w.mu.Unlock()
+
+			if w.useROSMode && exists && trackInfo.rosSubscriber != nil {
+				// Start ROS subscriber for this track
+				if err := trackInfo.rosSubscriber.Start(); err != nil {
+					log.Printf("ERROR: Failed to start ROS subscriber for track %s: %v", trackID, err)
 				} else {
-					log.Println("ROS subscriber started")
+					log.Printf("ROS subscriber started for track %s (camera %d)", trackID, trackInfo.cameraNumber)
 				}
 			} else if w.useCameraMode && w.cameraCapture != nil {
 				// Start camera capture on first connection
@@ -159,23 +249,32 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 			} else if w.videoStreamer != nil {
 				w.videoStreamer.StartStreaming()
 			}
+
 		case webrtc.PeerConnectionStateDisconnected, webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			log.Printf("[%s] WebRTC disconnected", peerID)
-			// Check if any peers are still connected
+
 			w.mu.Lock()
-			hasConnected := false
-			for id, pc := range w.peerConnections {
-				if id != peerID && pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
-					hasConnected = true
-					break
+			trackID := w.peerToTrack[peerID]
+			trackInfo, trackExists := w.tracks[trackID]
+
+			// Check if any other peers are using the same track
+			trackStillInUse := false
+			for otherPeerID, otherTrackID := range w.peerToTrack {
+				if otherPeerID != peerID && otherTrackID == trackID {
+					if pc, exists := w.peerConnections[otherPeerID]; exists {
+						if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+							trackStillInUse = true
+							break
+						}
+					}
 				}
 			}
 			w.mu.Unlock()
 
-			if !hasConnected {
-				log.Println("No peers connected, stopping video stream")
-				if w.useROSMode && w.rosSubscriber != nil {
-					w.rosSubscriber.Stop()
+			if !trackStillInUse && trackExists {
+				log.Printf("No peers using track %s, stopping ROS subscriber", trackID)
+				if w.useROSMode && trackInfo.rosSubscriber != nil {
+					trackInfo.rosSubscriber.Stop()
 				} else if w.useCameraMode && w.cameraCapture != nil {
 					w.cameraCapture.Stop()
 				} else if w.videoStreamer != nil {
@@ -257,6 +356,82 @@ func (w *WebRTCManager) SetupICECandidateHandler(peerID string, handler func(*we
 	})
 }
 
+// SwitchCameraForPeer switches the camera for a specific peer
+func (w *WebRTCManager) SwitchCameraForPeer(peerID string, cameraNumber int) error {
+	log.Printf("SwitchCameraForPeer called for peer %s with camera number: %d", peerID, cameraNumber)
+
+	if cameraNumber < 1 || cameraNumber > 7 {
+		return fmt.Errorf("invalid camera number: %d (must be 1-7)", cameraNumber)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Get track ID for this peer
+	trackID, exists := w.peerToTrack[peerID]
+	if !exists {
+		return fmt.Errorf("peer %s not found", peerID)
+	}
+
+	// Get track info
+	trackInfo, exists := w.tracks[trackID]
+	if !exists {
+		return fmt.Errorf("track %s not found for peer %s", trackID, peerID)
+	}
+
+	// Check if already on this camera
+	if trackInfo.cameraNumber == cameraNumber {
+		log.Printf("Track %s already on camera %d, no switch needed", trackID, cameraNumber)
+		return nil
+	}
+
+	// ROS mode - switch ROS subscriber
+	if w.useROSMode && trackInfo.rosSubscriber != nil {
+		log.Printf("Track %s: stopping current subscriber (camera %d)", trackID, trackInfo.cameraNumber)
+		trackInfo.rosSubscriber.Stop()
+
+		// Create new subscriber with different topic
+		trackInfo.rosSubscriber = NewROSSubscriber(trackInfo.track, cameraNumber, w.rosMasterURI, trackID)
+		trackInfo.cameraNumber = cameraNumber
+
+		// Check if custom topic is defined for this camera number
+		if customTopic, exists := w.customTopics[cameraNumber]; exists {
+			trackInfo.rosSubscriber.topicName = customTopic
+			log.Printf("Track %s: using custom topic for camera %d: %s", trackID, cameraNumber, customTopic)
+		} else {
+			log.Printf("Track %s: using default topic for camera %d: %s", trackID, cameraNumber, trackInfo.rosSubscriber.topicName)
+		}
+
+		// Check if any peers using this track are connected
+		trackInUse := false
+		for otherPeerID, otherTrackID := range w.peerToTrack {
+			if otherTrackID == trackID {
+				if pc, exists := w.peerConnections[otherPeerID]; exists {
+					if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+						trackInUse = true
+						break
+					}
+				}
+			}
+		}
+
+		if trackInUse {
+			log.Printf("Track %s: starting subscriber for camera %d", trackID, cameraNumber)
+			if err := trackInfo.rosSubscriber.Start(); err != nil {
+				return fmt.Errorf("failed to start ROS subscriber for camera %d: %v", cameraNumber, err)
+			}
+			log.Printf("Successfully switched track %s to camera %d", trackID, cameraNumber)
+		} else {
+			log.Printf("Track %s: no connected peers, will start subscriber when client connects", trackID)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("camera switching not supported in current mode")
+}
+
+// SwitchCamera switches camera globally (deprecated, kept for backward compatibility)
 func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 	log.Printf("SwitchCamera called with camera number: %d", cameraNumber)
 
@@ -269,8 +444,8 @@ func (w *WebRTCManager) SwitchCamera(cameraNumber int) error {
 		log.Printf("ROS mode: stopping current subscriber")
 		w.rosSubscriber.Stop()
 
-		// Create new subscriber with different topic
-		w.rosSubscriber = NewROSSubscriber(w.videoTrack, cameraNumber, w.rosMasterURI)
+		// Create new subscriber with different topic (legacy single-track mode)
+		w.rosSubscriber = NewROSSubscriber(w.videoTrack, cameraNumber, w.rosMasterURI, "legacy")
 
 		// Check if custom topic is defined for this camera number
 		if customTopic, exists := w.customTopics[cameraNumber]; exists {
@@ -346,23 +521,35 @@ func (w *WebRTCManager) DisconnectPeer(peerID string) error {
 		err := peerConnection.Close()
 		delete(w.peerConnections, peerID)
 
-		// Check if any peers are still connected
-		hasConnected := false
-		for _, pc := range w.peerConnections {
-			if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
-				hasConnected = true
-				break
-			}
-		}
+		// Get track ID and check if any other peers are using it
+		trackID, hasTrack := w.peerToTrack[peerID]
+		delete(w.peerToTrack, peerID) // Remove peer-to-track mapping
 
-		if !hasConnected {
-			log.Println("No peers connected after disconnect, stopping video stream")
-			if w.useROSMode && w.rosSubscriber != nil {
-				w.rosSubscriber.Stop()
-			} else if w.useCameraMode && w.cameraCapture != nil {
-				w.cameraCapture.Stop()
-			} else if w.videoStreamer != nil {
-				w.videoStreamer.StopStreaming()
+		// Check if any other peers are using the same track
+		if hasTrack {
+			trackStillInUse := false
+			for otherPeerID, otherTrackID := range w.peerToTrack {
+				if otherTrackID == trackID {
+					if pc, exists := w.peerConnections[otherPeerID]; exists {
+						if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+							trackStillInUse = true
+							break
+						}
+					}
+				}
+			}
+
+			if !trackStillInUse {
+				log.Printf("No peers using track %s after disconnect, stopping ROS subscriber", trackID)
+				if trackInfo, exists := w.tracks[trackID]; exists {
+					if w.useROSMode && trackInfo.rosSubscriber != nil {
+						trackInfo.rosSubscriber.Stop()
+					} else if w.useCameraMode && w.cameraCapture != nil {
+						w.cameraCapture.Stop()
+					} else if w.videoStreamer != nil {
+						w.videoStreamer.StopStreaming()
+					}
+				}
 			}
 		}
 
@@ -377,13 +564,24 @@ func (w *WebRTCManager) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Close all peer connections
 	for peerID, peerConnection := range w.peerConnections {
 		log.Printf("Closing peer connection: %s", peerID)
 		peerConnection.Close()
 	}
-
 	w.peerConnections = make(map[string]*webrtc.PeerConnection)
+	w.peerToTrack = make(map[string]string)
 
+	// Stop all track subscribers
+	for trackID, trackInfo := range w.tracks {
+		log.Printf("Stopping ROS subscriber for track: %s", trackID)
+		if w.useROSMode && trackInfo.rosSubscriber != nil {
+			trackInfo.rosSubscriber.Stop()
+		}
+	}
+	w.tracks = make(map[string]*TrackInfo)
+
+	// Legacy cleanup for backward compatibility
 	if w.useROSMode && w.rosSubscriber != nil {
 		w.rosSubscriber.Stop()
 	} else if w.useCameraMode && w.cameraCapture != nil {
