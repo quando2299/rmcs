@@ -15,6 +15,13 @@ import (
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+// Global cache for encoder detection to avoid slow gst-inspect calls
+var (
+	encoderDetectionDone   bool
+	hasNVIDIAEncoder       bool
+	encoderDetectionMutex  sync.Mutex
+)
+
 type ROSSubscriber struct {
 	track        *webrtc.TrackLocalStaticSample
 	node         *goroslib.Node
@@ -227,23 +234,41 @@ func (r *ROSSubscriber) initGStreamer() error {
 	}
 
 	// Try NVIDIA hardware encoder first (for Jetson)
-	log.Printf("Attempting to start GStreamer with NVIDIA hardware encoder for dimensions: %dx%d", r.width, r.height)
+	log.Printf("Attempting to start GStreamer for dimensions: %dx%d", r.width, r.height)
 
+	// Optimized NVIDIA pipeline for dual-stream performance
+	// - Lower bitrate (1.5Mbps instead of 2Mbps) to reduce encoder load
+	// - Reduced IDR interval for faster recovery
+	// - maxperf-enable=1 for maximum performance
 	nvidiaPipeline := fmt.Sprintf(
 		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
-			"nvv4l2h264enc maxperf-enable=1 bitrate=2000000 preset-level=1 idrinterval=%d control-rate=1 ! "+
+			"nvv4l2h264enc maxperf-enable=1 bitrate=1500000 preset-level=1 idrinterval=15 control-rate=1 ! "+
 			"h264parse config-interval=-1 ! fdsink",
-		r.width, r.height, r.fps, r.fps,
+		r.width, r.height, r.fps,
 	)
 
-	// Check if NVIDIA encoder is available
+	// Check if NVIDIA encoder is available (cached to avoid slow gst-inspect)
 	var pipeline string
-	checkCmd := exec.Command("gst-inspect-1.0", "nvv4l2h264enc")
-	if err := checkCmd.Run(); err == nil {
+	encoderDetectionMutex.Lock()
+	if !encoderDetectionDone {
+		log.Printf("First-time encoder detection (this may take a few seconds)...")
+		checkCmd := exec.Command("gst-inspect-1.0", "nvv4l2h264enc")
+		hasNVIDIAEncoder = (checkCmd.Run() == nil)
+		encoderDetectionDone = true
+		if hasNVIDIAEncoder {
+			log.Printf("NVIDIA hardware encoder detected (will be used for all streams)")
+		} else {
+			log.Printf("NVIDIA encoder not available, using x264 software encoder (will be used for all streams)")
+		}
+	}
+	useNVIDIA := hasNVIDIAEncoder
+	encoderDetectionMutex.Unlock()
+
+	if useNVIDIA {
 		// NVIDIA encoder available - use it
-		log.Printf("NVIDIA hardware encoder detected, using nvv4l2h264enc")
+		log.Printf("Using NVIDIA nvv4l2h264enc hardware encoder")
 		pipeline = nvidiaPipeline
 		r.cmd = exec.Command("/bin/sh", "-c", nvidiaPipeline)
 	} else {
@@ -318,8 +343,16 @@ func (r *ROSSubscriber) initGStreamer() error {
 	go func() {
 		err := r.cmd.Wait()
 		if err != nil {
-			log.Printf("GStreamer process CRASHED for track %s: %v", r.trackID, err)
-			log.Printf("HINT: If error mentions 'nvv4l2h264enc' or 'nvvidconv', you MUST run on Jetson device with NVIDIA GPU")
+			// Check if this was an intentional kill (e.g., during camera switch)
+			exitErr, isExitError := err.(*exec.ExitError)
+			if isExitError && (exitErr.String() == "signal: killed" ||
+			                    exitErr.String() == "waitid: no child processes" ||
+			                    exitErr.String() == "wait: no child processes") {
+				log.Printf("GStreamer stopped for track %s (camera switch or cleanup)", r.trackID)
+			} else {
+				log.Printf("GStreamer process CRASHED for track %s: %v", r.trackID, err)
+				log.Printf("HINT: If error mentions 'nvv4l2h264enc' or 'nvvidconv', you MUST run on Jetson device with NVIDIA GPU")
+			}
 		} else {
 			log.Printf("GStreamer process exited normally for track %s", r.trackID)
 		}
