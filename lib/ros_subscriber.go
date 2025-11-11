@@ -71,6 +71,7 @@ type ROSSubscriber struct {
 	lastFrameAcceptTime time.Time
 	minFrameInterval    time.Duration
 	framesDropped       int
+	encoderStartTime    time.Time // Track when encoder started for warm-up period
 }
 
 func NewROSSubscriber(track *webrtc.TrackLocalStaticSample, cameraIndex int, rosMasterURI string, trackID string) *ROSSubscriber {
@@ -479,7 +480,24 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 			log.Printf("ERROR: Failed to start GStreamer: %v", err)
 			return
 		}
+
+		// Mark encoder start time for warm-up period
+		r.encoderStartTime = time.Now()
+		r.mu.Unlock()
+		log.Printf("Skipping first frame to allow encoder initialization")
+		return
 	}
+
+	// Warm-up period: skip frames for first 500ms to let NVIDIA encoder stabilize
+	encoderStart := r.encoderStartTime
+	r.mu.Unlock()
+
+	if !encoderStart.IsZero() && time.Since(encoderStart) < 500*time.Millisecond {
+		// Still in warm-up period - drop frame
+		return
+	}
+
+	r.mu.Lock()
 
 	// Handle dimension changes (restart GStreamer)
 	if msg.Width != r.width || msg.Height != r.height {
@@ -501,6 +519,26 @@ func (r *ROSSubscriber) handleImageMessage(msg *sensor_msgs.Image) {
 		}
 	}
 
+	// Frame rate limiting to prevent bursts and encoder overload
+	lastAccept := r.lastFrameAcceptTime
+	minInterval := r.minFrameInterval
+	r.mu.Unlock()
+
+	// Check if enough time has passed since last frame
+	if !lastAccept.IsZero() {
+		elapsed := time.Since(lastAccept)
+		if elapsed < minInterval {
+			// Drop frame - too soon since last frame
+			r.mu.Lock()
+			r.framesDropped++
+			r.mu.Unlock()
+			return
+		}
+	}
+
+	// Update last frame accept time
+	r.mu.Lock()
+	r.lastFrameAcceptTime = time.Now()
 	r.mu.Unlock()
 
 	// Add logging to verify messages are being received
