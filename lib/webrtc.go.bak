@@ -374,13 +374,13 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			// Stop audio when NO peers are connected at all (audio is shared across all peers)
 			if !hasConnected {
-// 				log.Println("No peers connected, stopping audio (if running)")
-// 				if w.audioCapture != nil {
-// 					w.audioCapture.Stop()
-// 				}
-// 				if w.audioPlayback != nil {
-// 					w.audioPlayback.Stop()
-// 				}
+				log.Println("No peers connected, stopping audio (if running)")
+				if w.audioCapture != nil {
+					w.audioCapture.Stop()
+				}
+				if w.audioPlayback != nil {
+					w.audioPlayback.Stop()
+				}
 			}
 		}
 	})
