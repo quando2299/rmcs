@@ -21,7 +21,10 @@ type WebRTCManager struct {
 	peerConnections map[string]*webrtc.PeerConnection
 	tracks          map[string]*TrackInfo // trackID -> TrackInfo (e.g., "left", "right")
 	peerToTrack     map[string]string     // peerID -> trackID
-	videoTrack      *webrtc.TrackLocalStaticSample // Deprecated: kept for backward compatibility
+	videoTrack      *webrtc.TrackLocalStaticSample
+	audioTrack      *webrtc.TrackLocalStaticSample // Audio track for bidirectional communication - vnextthongnv
+	audioCapture    *AudioCapture                  // Microphone capture - vnextthongnv
+	audioPlayback   *AudioPlayback                 // Speaker playback - vnextthongnv
 	videoStreamer   *VideoStreamer
 	cameraCapture   *CameraCapture
 	rosSubscriber   *ROSSubscriber // Deprecated: kept for backward compatibility
@@ -66,6 +69,22 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 	if err != nil {
 		return nil, err
 	}
+		
+	// Create an audio track for Opus with VoIP optimization - vnextthongnv
+	audioTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:    webrtc.MimeTypeOpus,
+			ClockRate:   48000,
+			Channels:    2,
+			SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		"audio",
+		"stream",
+	)
+	if err != nil {
+		return nil, err
+	}
+	log.Println("Audio track created successfully (Opus 48kHz stereo)") // vnextthongnv
 
 	// Use ROS mode for streaming from ROS topics
 	useROSMode := true
@@ -106,14 +125,21 @@ func NewWebRTCManager() (*WebRTCManager, error) {
 		log.Printf("ROS mode enabled - will subscribe to topic for camera %d: %s", cameraIndex, rosSubscriber.topicName)
 	}
 
+	// Create audio capture and playback - vnextthongnv
+	audioCapture := NewAudioCapture(audioTrack)
+	audioPlayback := NewAudioPlayback()
+
 	return &WebRTCManager{
 		peerConnections: make(map[string]*webrtc.PeerConnection),
 		tracks:          make(map[string]*TrackInfo),
 		peerToTrack:     make(map[string]string),
-		videoTrack:      videoTrack,       // Deprecated: for backward compatibility
-		rosSubscriber:   rosSubscriber,    // Deprecated: for backward compatibility
-		videoStreamer:   nil,              // No file-based streaming
-		cameraCapture:   nil,              // No direct camera capture
+		videoTrack:      videoTrack,
+		audioTrack:      audioTrack,   // vnextthongnv
+		audioCapture:    audioCapture, // vnextthongnv
+		audioPlayback:   audioPlayback, // vnextthongnv
+		videoStreamer:   nil, // No file-based streaming
+		cameraCapture:   nil, // No direct camera capture
+		rosSubscriber:   rosSubscriber,
 		useROSMode:      useROSMode,
 		useCameraMode:   false,
 		rosMasterURI:    rosMasterURI,
@@ -216,6 +242,32 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 	}
 	log.Printf("Added track %s to peer %s", trackID, peerID)
 
+	// Add the audio track to the new peer connection - vnextthongnv
+	_, err = peerConnection.AddTrack(w.audioTrack)
+	if err != nil {
+		peerConnection.Close()
+		return "", err
+	}
+	log.Printf("[%s] Added video and audio tracks to peer connection", peerID) // vnextthongnv
+
+	// Set up OnTrack handler to receive remote audio from browser - vnextthongnv
+	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		log.Printf("[%s] 🎵 OnTrack fired: kind=%s, codec=%s, id=%s", 
+			peerID, track.Kind().String(), track.Codec().MimeType, track.ID())
+		
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			log.Printf("[%s] ✓ Remote AUDIO track received from browser (browser mic → VM speaker)", peerID)
+			log.Printf("[%s] Audio codec: %s, PayloadType: %d, ClockRate: %d", 
+				peerID, track.Codec().MimeType, track.PayloadType(), track.Codec().ClockRate)
+			
+			// Start the playback loop to decode and play the audio
+			go w.audioPlayback.PlaybackLoop(track)
+			log.Printf("[%s] ✓ Audio playback loop started for remote track", peerID)
+		} else {
+			log.Printf("[%s] Ignoring non-audio track: %s", peerID, track.Kind().String())
+		}
+	})
+
 	// Set up connection state handlers
 	peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		log.Printf("[%s] ICE connection state changed: %s", peerID, state.String())
@@ -227,13 +279,44 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 		switch state {
 		case webrtc.PeerConnectionStateConnected:
 			log.Printf("[%s] WebRTC connected, starting video stream", peerID)
+
+			// Get track for this peer (multi-track architecture)
 			w.mu.Lock()
 			trackID := w.peerToTrack[peerID]
 			trackInfo, exists := w.tracks[trackID]
 			w.mu.Unlock()
 
+			// Start audio capture/playback on first peer connection (audio is shared)
+			// Check if any peer was already connected before starting audio
+			w.mu.Lock()
+			alreadyHadConnection := false
+			for otherPeerID, pc := range w.peerConnections {
+				if otherPeerID != peerID && pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+					alreadyHadConnection = true
+					break
+				}
+			}
+			w.mu.Unlock()
+
+			if !alreadyHadConnection {
+				// First peer connected - start audio
+				log.Println("DEBUG: Starting audio capture (VM mic → browser)")
+				if err := w.audioCapture.Start(); err != nil {
+					log.Printf("ERROR: Failed to start audio capture: %v", err)
+				} else {
+					log.Println("✓ Audio capture started (VM mic → browser)")
+				}
+
+				log.Println("DEBUG: Initializing audio playback decoder (browser mic → VM speaker)")
+				if err := w.audioPlayback.StartDecoder(); err != nil {
+					log.Printf("ERROR: Failed to initialize audio playback: %v", err)
+				} else {
+					log.Println("✓ Audio playback decoder initialized, waiting for browser audio track...")
+				}
+			}
+
+			// Start ROS subscriber for this specific track (multi-track architecture)
 			if w.useROSMode && exists && trackInfo.rosSubscriber != nil {
-				// Start ROS subscriber for this track
 				if err := trackInfo.rosSubscriber.Start(); err != nil {
 					log.Printf("ERROR: Failed to start ROS subscriber for track %s: %v", trackID, err)
 				} else {
@@ -259,18 +342,23 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			// Check if any other peers are using the same track
 			trackStillInUse := false
+			// Check if ANY peers are still connected (for audio management)
+			hasConnected := false
 			for otherPeerID, otherTrackID := range w.peerToTrack {
-				if otherPeerID != peerID && otherTrackID == trackID {
+				if otherPeerID != peerID {
 					if pc, exists := w.peerConnections[otherPeerID]; exists {
 						if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
-							trackStillInUse = true
-							break
+							hasConnected = true
+							if otherTrackID == trackID {
+								trackStillInUse = true
+							}
 						}
 					}
 				}
 			}
 			w.mu.Unlock()
 
+			// Stop specific track's ROS subscriber when no peers use it (multi-track architecture)
 			if !trackStillInUse && trackExists {
 				log.Printf("No peers using track %s, stopping ROS subscriber", trackID)
 				if w.useROSMode && trackInfo.rosSubscriber != nil {
@@ -280,6 +368,13 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 				} else if w.videoStreamer != nil {
 					w.videoStreamer.StopStreaming()
 				}
+			}
+
+			// Stop audio when NO peers are connected at all (audio is shared across all peers)
+			if !hasConnected {
+				log.Println("No peers connected, stopping audio")
+				w.audioCapture.Stop()
+				w.audioPlayback.Stop()
 			}
 		}
 	})
