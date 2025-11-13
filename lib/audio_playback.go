@@ -42,12 +42,15 @@ func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 
 	// Smart overflow handling: drop oldest packet if buffer near full
 	if jb.count >= len(jb.buffer)-1 {
-		// Buffer at 9/10 or full - drop OLDEST packet (maintain recency)
+		// Buffer at capacity - drop OLDEST packet (maintain recency)
 		if jb.count > 0 {
 			jb.readIdx = (jb.readIdx + 1) % len(jb.buffer)
 			jb.count--
 			jb.underrunCount++ // Count as underrun for stats
-			log.Printf("Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
+			// Log only first few drops + periodic summary to avoid spam (normal during startup bursts)
+			if jb.underrunCount <= 5 || jb.underrunCount%50 == 0 {
+				log.Printf("Jitter buffer near full (%d) - dropped oldest packet #%d", jb.count+1, jb.underrunCount)
+			}
 		}
 	}
 

@@ -299,17 +299,17 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 			w.mu.Unlock()
 
 			if !alreadyHadConnection {
-				// First peer connected - start audio
+				// First peer connected - start audio (optional, graceful failure if no devices)
 				log.Println("DEBUG: Starting audio capture (VM mic → browser)")
 				if err := w.audioCapture.Start(); err != nil {
-					log.Printf("ERROR: Failed to start audio capture: %v", err)
+					log.Printf("WARNING: Audio capture not available (no mic?), continuing video-only: %v", err)
 				} else {
 					log.Println("✓ Audio capture started (VM mic → browser)")
 				}
 
 				log.Println("DEBUG: Initializing audio playback decoder (browser mic → VM speaker)")
 				if err := w.audioPlayback.StartDecoder(); err != nil {
-					log.Printf("ERROR: Failed to initialize audio playback: %v", err)
+					log.Printf("WARNING: Audio playback not available (no speaker?), continuing video-only: %v", err)
 				} else {
 					log.Println("✓ Audio playback decoder initialized, waiting for browser audio track...")
 				}
@@ -372,9 +372,13 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			// Stop audio when NO peers are connected at all (audio is shared across all peers)
 			if !hasConnected {
-				log.Println("No peers connected, stopping audio")
-				w.audioCapture.Stop()
-				w.audioPlayback.Stop()
+				log.Println("No peers connected, stopping audio (if running)")
+				if w.audioCapture != nil {
+					w.audioCapture.Stop()
+				}
+				if w.audioPlayback != nil {
+					w.audioPlayback.Stop()
+				}
 			}
 		}
 	})
