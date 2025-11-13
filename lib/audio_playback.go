@@ -341,6 +341,11 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 						log.Println("Audio playback device not available, discarding audio for testing")
 						useDummyPlayback = true
 					} else {
+						// FFmpeg crashed - stop both playback and decode threads
+						log.Println("FFmpeg crashed, stopping audio playback and decode")
+						a.mu.Lock()
+						a.running = false
+						a.mu.Unlock()
 						break
 					}
 				}
