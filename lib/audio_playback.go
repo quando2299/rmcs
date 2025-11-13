@@ -14,7 +14,7 @@ import (
 
 // JitterBuffer manages packet buffering for smooth playback
 type JitterBuffer struct {
-	buffer       [10][]byte // Ring buffer: 10 packets = 200ms at 20ms/packet
+	buffer       [30][]byte // Ring buffer: 30 packets = 600ms (increased for burst tolerance)
 	writeIdx     int        // Write position
 	readIdx      int        // Read position
 	count        int        // Current buffered packets
