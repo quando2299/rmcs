@@ -239,15 +239,15 @@ func (r *ROSSubscriber) initGStreamer() error {
 
 	// Optimized NVIDIA pipeline for dual-stream performance
 	// - Lower bitrate (1.5Mbps instead of 2Mbps) to reduce encoder load
-	// - Reduced IDR interval for faster recovery
+	// - IDR interval set to FPS for fewer keyframes (improves encoding performance)
 	// - maxperf-enable=1 for maximum performance
 	nvidiaPipeline := fmt.Sprintf(
 		"gst-launch-1.0 -q fdsrc ! rawvideoparse width=%d height=%d format=bgr framerate=%d/1 ! "+
 			"videoconvert ! nvvidconv ! "+
 			"'video/x-raw(memory:NVMM),format=NV12' ! "+
-			"nvv4l2h264enc maxperf-enable=1 bitrate=1500000 preset-level=1 idrinterval=15 control-rate=1 ! "+
+			"nvv4l2h264enc maxperf-enable=1 bitrate=1500000 preset-level=1 idrinterval=%d control-rate=1 ! "+
 			"h264parse config-interval=-1 ! fdsink",
-		r.width, r.height, r.fps,
+		r.width, r.height, r.fps, r.fps,
 	)
 
 	// Check if NVIDIA encoder is available (cached to avoid slow gst-inspect)
