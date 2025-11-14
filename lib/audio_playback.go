@@ -14,7 +14,7 @@ import (
 
 // JitterBuffer manages packet buffering for smooth playback
 type JitterBuffer struct {
-	buffer       [30][]byte // Ring buffer: 30 packets = 600ms (increased for burst tolerance)
+	buffer       [10][]byte // Ring buffer: 10 packets = 200ms at 20ms/packet
 	writeIdx     int        // Write position
 	readIdx      int        // Read position
 	count        int        // Current buffered packets
@@ -42,15 +42,12 @@ func (jb *JitterBuffer) Enqueue(pcmBytes []byte) bool {
 
 	// Smart overflow handling: drop oldest packet if buffer near full
 	if jb.count >= len(jb.buffer)-1 {
-		// Buffer at capacity - drop OLDEST packet (maintain recency)
+		// Buffer at 9/10 or full - drop OLDEST packet (maintain recency)
 		if jb.count > 0 {
 			jb.readIdx = (jb.readIdx + 1) % len(jb.buffer)
 			jb.count--
 			jb.underrunCount++ // Count as underrun for stats
-			// Log only first few drops + periodic summary to avoid spam (normal during startup bursts)
-			if jb.underrunCount <= 5 || jb.underrunCount%50 == 0 {
-				log.Printf("Jitter buffer near full (%d) - dropped oldest packet #%d", jb.count+1, jb.underrunCount)
-			}
+			log.Printf("Jitter buffer near full (%d) - dropped oldest packet to prevent overflow", jb.count+1)
 		}
 	}
 
@@ -341,11 +338,6 @@ func (a *AudioPlayback) TimedPlaybackLoop() {
 						log.Println("Audio playback device not available, discarding audio for testing")
 						useDummyPlayback = true
 					} else {
-						// FFmpeg crashed - stop both playback and decode threads
-						log.Println("FFmpeg crashed, stopping audio playback and decode")
-						a.mu.Lock()
-						a.running = false
-						a.mu.Unlock()
 						break
 					}
 				}
