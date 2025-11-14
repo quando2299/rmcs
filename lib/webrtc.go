@@ -250,22 +250,19 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 	}
 	log.Printf("[%s] Added video and audio tracks to peer connection", peerID) // vnextthongnv
 
-	// TEMPORARY: OnTrack handler disabled - audio causing FPS drop
 	// Set up OnTrack handler to receive remote audio from browser - vnextthongnv
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		log.Printf("[%s] OnTrack fired (audio disabled): kind=%s", peerID, track.Kind().String())
-		// Audio playback disabled to restore video performance
-		// if track.Kind() == webrtc.RTPCodecTypeAudio {
-		// 	log.Printf("[%s] ✓ Remote AUDIO track received from browser (browser mic → VM speaker)", peerID)
-		// 	log.Printf("[%s] Audio codec: %s, PayloadType: %d, ClockRate: %d",
-		// 		peerID, track.Codec().MimeType, track.PayloadType(), track.Codec().ClockRate)
-		//
-		// 	// Start the playback loop to decode and play the audio
-		// 	go w.audioPlayback.PlaybackLoop(track)
-		// 	log.Printf("[%s] ✓ Audio playback loop started for remote track", peerID)
-		// } else {
-		// 	log.Printf("[%s] Ignoring non-audio track: %s", peerID, track.Kind().String())
-		// }
+		if track.Kind() == webrtc.RTPCodecTypeAudio {
+			log.Printf("[%s] Remote AUDIO track received from browser (browser mic -> VM speaker)", peerID)
+			log.Printf("[%s] Audio codec: %s, PayloadType: %d, ClockRate: %d",
+				peerID, track.Codec().MimeType, track.PayloadType(), track.Codec().ClockRate)
+
+			// Start the playback loop to decode and play the audio
+			go w.audioPlayback.PlaybackLoop(track)
+			log.Printf("[%s] Audio playback loop started for remote track", peerID)
+		} else {
+			log.Printf("[%s] Ignoring non-audio track: %s", peerID, track.Kind().String())
+		}
 	})
 
 	// Set up connection state handlers
@@ -300,21 +297,19 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 
 			if !alreadyHadConnection {
 				// First peer connected - start audio (optional, graceful failure if no devices)
-				// TEMPORARY: Audio disabled for testing
-			log.Println("DEBUG: Audio capture temporarily disabled")
-			// log.Println("DEBUG: Starting audio capture (VM mic → browser)")
-// 				if err := w.audioCapture.Start(); err != nil {
-// 					log.Printf("WARNING: Audio capture not available (no mic?), continuing video-only: %v", err)
-// 				} else {
-// 					log.Println("✓ Audio capture started (VM mic → browser)")
-// 				}
+				log.Println("DEBUG: Starting audio capture (VM mic -> browser)")
+			if err := w.audioCapture.Start(); err != nil {
+				log.Printf("WARNING: Audio capture not available (no mic?), continuing video-only: %v", err)
+			} else {
+				log.Println("Audio capture started (VM mic -> browser)")
+			}
 
-// 				log.Println("DEBUG: Initializing audio playback decoder (browser mic → VM speaker)")
-// 				if err := w.audioPlayback.StartDecoder(); err != nil {
-// 					log.Printf("WARNING: Audio playback not available (no speaker?), continuing video-only: %v", err)
-// 				} else {
-// 					log.Println("✓ Audio playback decoder initialized, waiting for browser audio track...")
-// 				}
+			log.Println("DEBUG: Initializing audio playback decoder (browser mic -> VM speaker)")
+			if err := w.audioPlayback.StartDecoder(); err != nil {
+				log.Printf("WARNING: Audio playback not available (no speaker?), continuing video-only: %v", err)
+			} else {
+				log.Println("Audio playback decoder initialized, waiting for browser audio track...")
+			}
 			}
 
 			// Start ROS subscriber for this specific track (multi-track architecture)
