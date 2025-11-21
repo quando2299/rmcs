@@ -367,16 +367,16 @@ func (w *WebRTCManager) ProcessOffer(peerID string, offerSDP string) (string, er
 				}
 			}
 
-			// Stop audio when NO peers are connected at all (audio is shared across all peers)
-			if !hasConnected {
-// 				log.Println("No peers connected, stopping audio (if running)")
-// 				if w.audioCapture != nil {
-// 					w.audioCapture.Stop()
-// 				}
-// 				if w.audioPlayback != nil {
-// 					w.audioPlayback.Stop()
-// 				}
+		// Stop audio when NO peers are connected at all (audio is shared across all peers)
+		if !hasConnected {
+			log.Println("No peers connected, stopping audio (if running)")
+			if w.audioCapture != nil {
+				w.audioCapture.Stop()
 			}
+			if w.audioPlayback != nil {
+				w.audioPlayback.Stop()
+			}
+		}
 		}
 	})
 
@@ -646,6 +646,26 @@ func (w *WebRTCManager) DisconnectPeer(peerID string) error {
 						w.videoStreamer.StopStreaming()
 					}
 				}
+			}
+		}
+
+		// Check if ANY peers are still connected for audio management
+		hasAnyConnectedPeer := false
+		for _, pc := range w.peerConnections {
+			if pc.ConnectionState() == webrtc.PeerConnectionStateConnected {
+				hasAnyConnectedPeer = true
+				break
+			}
+		}
+
+		// Stop audio when NO peers are connected (audio is shared across all peers)
+		if !hasAnyConnectedPeer {
+			log.Println("No peers connected after disconnect, stopping audio")
+			if w.audioCapture != nil {
+				w.audioCapture.Stop()
+			}
+			if w.audioPlayback != nil {
+				w.audioPlayback.Stop()
 			}
 		}
 
