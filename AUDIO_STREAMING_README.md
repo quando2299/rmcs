@@ -84,20 +84,4 @@ pactl list short sinks | grep echocancel
 ```
 ---
 
-## Quick Commands
-
-```bash
-# Check audio status
-pactl get-default-source  # Mic
-pactl get-default-sink     # Speaker
-
-# View logs
-tail -f logs/rmcs.log | grep -E "Audio|AEC"
-
-# Restart audio
-pulseaudio -k && pulseaudio --start
-```
-
----
-
 **Audio streaming works automatically when RMCS starts. No additional configuration needed.**
